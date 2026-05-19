@@ -474,25 +474,24 @@ print("STEP 5: Additional data availability in genetic cohort")
 print("=" * 60)
 
 # ── 5a. Key measurements (labs + vitals) ─────────────────────────────────
-# OMOP measurement tables mix units across contributing health systems — e.g.
-# cholesterol in mg/dL from one site and mmol/L from another, with no
-# consistent unit_concept_id. AVG across mixed units is meaningless.
+# IMPORTANT — these labs are COVARIATES, not inclusion criteria.
+# A participant missing BMI or cholesterol stays in the cohort; their
+# time-to-event data is still valid. Missingness will be handled in the
+# cleaning step (most-recent-value imputation + missingness indicator flags).
 #
-# Strategy:
-#   1. Restrict to a clinically plausible hard range per concept to exclude
-#      unit-conversion outliers and data entry errors before aggregating.
-#   2. Report median (p50) + p5/p95 via APPROX_QUANTILES — median is robust
-#      to the remaining unit noise that slips through; mean is not.
-#   3. Also show the most common unit string so you can confirm which unit
-#      the majority of records use (important for the cleaning step).
+# This query is descriptive only — it tells us:
+#   (a) what the true value distributions look like (using range-filtered median)
+#   (b) what fraction of the genetic cohort has at least one usable reading
 #
-# Hard ranges used (values outside these are almost certainly unit errors):
-#   BMI:              10 – 80   (kg/m²)
-#   SBP:              60 – 250  (mmHg)
-#   DBP:              30 – 150  (mmHg)
-#   Total cholesterol: 50 – 500  (mg/dL); excludes mmol/L values (~1–15)
-#   HDL cholesterol:   10 – 150  (mg/dL)
-#   HbA1c:             3  – 20   (%)
+# Range filtering here is purely to get honest summary statistics.
+# OMOP mixes units across health systems so AVG is meaningless without it.
+# Hard ranges per concept (values outside = unit errors or mapping garbage):
+#   BMI:               10 – 80    (kg/m²)
+#   SBP:               60 – 250   (mmHg)
+#   DBP:               30 – 150   (mmHg)
+#   Total cholesterol: 50 – 500   (mg/dL)
+#   HDL cholesterol:   10 – 150   (mg/dL)  — normal HDL is 35–65, so 10–50 is valid
+#   HbA1c:              3 – 20    (%)
 
 lab_check_query = f"""
 WITH filtered AS (
@@ -513,7 +512,6 @@ WITH filtered AS (
         3007070,  -- HDL cholesterol
         3004410   -- HbA1c
     )
-    -- Keep only non-null, positive values within the plausible range per concept
     AND m.value_as_number IS NOT NULL
     AND CASE m.measurement_concept_id
         WHEN 3038553 THEN m.value_as_number BETWEEN 10  AND 80
@@ -528,26 +526,31 @@ WITH filtered AS (
 SELECT
     measurement_concept_id,
     concept_name,
-    COUNT(DISTINCT person_id)                                      AS n_participants,
-    COUNT(*)                                                       AS n_records_in_range,
-    -- APPROX_QUANTILES returns an array; index 5/50/95 of 100 = p5/median/p95
+    COUNT(DISTINCT person_id)                                      AS n_with_valid_reading,
+    COUNT(*)                                                       AS n_valid_records,
     ROUND(APPROX_QUANTILES(value_as_number, 100)[OFFSET(5)],  1)  AS p5,
     ROUND(APPROX_QUANTILES(value_as_number, 100)[OFFSET(50)], 1)  AS median,
     ROUND(APPROX_QUANTILES(value_as_number, 100)[OFFSET(95)], 1)  AS p95,
-    -- Most common unit string — tells you what unit the majority of records use
-    APPROX_TOP_COUNT(unit_source_value, 1)[OFFSET(0)].value        AS dominant_unit,
-    MIN(measurement_date)                                          AS earliest,
-    MAX(measurement_date)                                          AS latest
+    APPROX_TOP_COUNT(unit_source_value, 1)[OFFSET(0)].value        AS dominant_unit
 FROM filtered
 GROUP BY measurement_concept_id, concept_name
-ORDER BY n_participants DESC
+ORDER BY n_with_valid_reading DESC
 """
 
 lab_df = client.query(lab_check_query).to_dataframe()
-print("\nKey labs/vitals (plausible-range filtered, median ± p5/p95):")
-print(lab_df.to_string(index=False))
-print("\nNOTE: n_records_in_range excludes values outside the hard plausible range.")
-print("      Fraction excluded = signal of unit mixing or data entry errors at each site.")
+
+# Show coverage relative to genetic cohort size
+genetic_n = len(prs_df)
+lab_df['pct_of_genetic_cohort'] = (100 * lab_df['n_with_valid_reading'] / genetic_n).round(1)
+
+print(f"\nKey labs/vitals — range-filtered summary (N cohort = {genetic_n:,})")
+print("Values outside plausible ranges excluded from stats only; people are NOT dropped.")
+print()
+print(lab_df[['concept_name', 'n_with_valid_reading', 'pct_of_genetic_cohort',
+              'n_valid_records', 'p5', 'median', 'p95', 'dominant_unit']].to_string(index=False))
+print()
+print("pct_of_genetic_cohort = % of PRS participants with ≥1 valid reading.")
+print("Those without a reading will receive imputed values in the cleaning step.")
 
 # ── 5b. Smoking status ────────────────────────────────────────────────────
 # Smoking is captured both in observation table (survey) and condition_occurrence
