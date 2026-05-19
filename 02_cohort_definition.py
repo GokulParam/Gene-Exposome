@@ -474,33 +474,80 @@ print("STEP 5: Additional data availability in genetic cohort")
 print("=" * 60)
 
 # ── 5a. Key measurements (labs + vitals) ─────────────────────────────────
-# Concept IDs: LDL=3007070, SBP=3004249, DBP=3012888, BMI=3038553, HbA1c=3004410
+# OMOP measurement tables mix units across contributing health systems — e.g.
+# cholesterol in mg/dL from one site and mmol/L from another, with no
+# consistent unit_concept_id. AVG across mixed units is meaningless.
+#
+# Strategy:
+#   1. Restrict to a clinically plausible hard range per concept to exclude
+#      unit-conversion outliers and data entry errors before aggregating.
+#   2. Report median (p50) + p5/p95 via APPROX_QUANTILES — median is robust
+#      to the remaining unit noise that slips through; mean is not.
+#   3. Also show the most common unit string so you can confirm which unit
+#      the majority of records use (important for the cleaning step).
+#
+# Hard ranges used (values outside these are almost certainly unit errors):
+#   BMI:              10 – 80   (kg/m²)
+#   SBP:              60 – 250  (mmHg)
+#   DBP:              30 – 150  (mmHg)
+#   Total cholesterol: 50 – 500  (mg/dL); excludes mmol/L values (~1–15)
+#   HDL cholesterol:   10 – 150  (mg/dL)
+#   HbA1c:             3  – 20   (%)
+
 lab_check_query = f"""
-SELECT
-    m.measurement_concept_id,
-    c.concept_name,
-    COUNT(DISTINCT m.person_id) AS n_participants,
-    COUNT(*) AS n_records,
-    ROUND(AVG(m.value_as_number), 2) AS mean_value,
-    MIN(m.measurement_date) AS earliest,
-    MAX(m.measurement_date) AS latest
-FROM `{CDR}.measurement` m
-JOIN `{CDR}.concept` c ON m.measurement_concept_id = c.concept_id
-WHERE m.measurement_concept_id IN (
-    3007070,  -- LDL cholesterol
-    3004249,  -- Systolic blood pressure
-    3012888,  -- Diastolic blood pressure
-    3038553,  -- Body mass index
-    3004410,  -- HbA1c
-    3027114   -- Total cholesterol
+WITH filtered AS (
+    SELECT
+        m.measurement_concept_id,
+        c.concept_name,
+        m.person_id,
+        m.value_as_number,
+        m.measurement_date,
+        m.unit_source_value
+    FROM `{CDR}.measurement` m
+    JOIN `{CDR}.concept` c ON m.measurement_concept_id = c.concept_id
+    WHERE m.measurement_concept_id IN (
+        3038553,  -- BMI
+        3004249,  -- SBP
+        3012888,  -- DBP
+        3027114,  -- Total cholesterol
+        3007070,  -- HDL cholesterol
+        3004410   -- HbA1c
+    )
+    -- Keep only non-null, positive values within the plausible range per concept
+    AND m.value_as_number IS NOT NULL
+    AND CASE m.measurement_concept_id
+        WHEN 3038553 THEN m.value_as_number BETWEEN 10  AND 80
+        WHEN 3004249 THEN m.value_as_number BETWEEN 60  AND 250
+        WHEN 3012888 THEN m.value_as_number BETWEEN 30  AND 150
+        WHEN 3027114 THEN m.value_as_number BETWEEN 50  AND 500
+        WHEN 3007070 THEN m.value_as_number BETWEEN 10  AND 150
+        WHEN 3004410 THEN m.value_as_number BETWEEN 3   AND 20
+        ELSE TRUE
+    END
 )
-GROUP BY m.measurement_concept_id, c.concept_name
+SELECT
+    measurement_concept_id,
+    concept_name,
+    COUNT(DISTINCT person_id)                                      AS n_participants,
+    COUNT(*)                                                       AS n_records_in_range,
+    -- APPROX_QUANTILES returns an array; index 5/50/95 of 100 = p5/median/p95
+    ROUND(APPROX_QUANTILES(value_as_number, 100)[OFFSET(5)],  1)  AS p5,
+    ROUND(APPROX_QUANTILES(value_as_number, 100)[OFFSET(50)], 1)  AS median,
+    ROUND(APPROX_QUANTILES(value_as_number, 100)[OFFSET(95)], 1)  AS p95,
+    -- Most common unit string — tells you what unit the majority of records use
+    APPROX_TOP_COUNT(unit_source_value, 1)[OFFSET(0)].value        AS dominant_unit,
+    MIN(measurement_date)                                          AS earliest,
+    MAX(measurement_date)                                          AS latest
+FROM filtered
+GROUP BY measurement_concept_id, concept_name
 ORDER BY n_participants DESC
 """
 
 lab_df = client.query(lab_check_query).to_dataframe()
-print("\nKey labs/vitals available (all CDR, will subset to genetic cohort in cleaning step):")
+print("\nKey labs/vitals (plausible-range filtered, median ± p5/p95):")
 print(lab_df.to_string(index=False))
+print("\nNOTE: n_records_in_range excludes values outside the hard plausible range.")
+print("      Fraction excluded = signal of unit mixing or data entry errors at each site.")
 
 # ── 5b. Smoking status ────────────────────────────────────────────────────
 # Smoking is captured both in observation table (survey) and condition_occurrence
