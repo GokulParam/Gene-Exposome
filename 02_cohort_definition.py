@@ -472,19 +472,11 @@ print()
 print(f"{'All-cause death (any timing)':<50} "
       f"{cohort['has_any_death'].sum():>8,} "
       f"{100*cohort['has_any_death'].mean():>6.1f}%")
-      f"{100*cohort['proxy_cvd_death'].mean():>6.1f}%")
-print()
-print(f"{'All-cause death (any timing)':<45} "
-      f"{cohort['has_any_death'].sum():>8,} "
-      f"{100*cohort['has_any_death'].mean():>6.1f}%")
 
 print(f"\nDate completeness:")
-print(f"  PRIMARY events with a date:     "
-      f"{cohort.loc[cohort['mace2_event'], 'mace2_date'].notna().sum():,} / "
-      f"{cohort['mace2_event'].sum():,}")
-print(f"  SENSITIVITY events with a date: "
-      f"{cohort.loc[cohort['mace3s_event'], 'mace3s_date'].notna().sum():,} / "
-      f"{cohort['mace3s_event'].sum():,}")
+print(f"  3-pt MACE events with a date: "
+      f"{cohort.loc[cohort['mace3_event'], 'mace3_date'].notna().sum():,} / "
+      f"{cohort['mace3_event'].sum():,}")
 
 print(f"\nPrimary outcome date range:")
 mace_dates = cohort.loc[cohort['mace3_event'], 'mace3_date']
