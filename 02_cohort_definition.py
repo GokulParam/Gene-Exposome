@@ -378,6 +378,12 @@ cohort['has_any_death'] = cohort['death_date_any'].notna()
 # 3-point MACE: any of the three
 cohort['has_mace'] = cohort['has_mi'] | cohort['has_stroke'] | cohort['has_cvd_death']
 
+# Convert all date columns to datetime64 before taking row-wise min.
+# BigQuery returns datetime.date objects; NaN fills (from left-merge misses) are
+# float, so numpy's <= comparison blows up unless everything is the same dtype.
+for col in ['mi_date', 'stroke_date', 'cvd_death_date']:
+    cohort[col] = pd.to_datetime(cohort[col], errors='coerce')
+
 # Earliest MACE date (for survival analysis)
 cohort['mace_date'] = cohort[['mi_date', 'stroke_date', 'cvd_death_date']].min(axis=1)
 
