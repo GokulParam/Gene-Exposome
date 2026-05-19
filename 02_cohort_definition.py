@@ -464,76 +464,65 @@ print(f"  Latest:   {mace_dates.max().date()}")
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# STEP 4b — Apply incident-only filter (landmark date Jan 1 2019)
+# STEP 4b — Apply incident-only filter (landmark date Jan 1 2018)
 # ══════════════════════════════════════════════════════════════════════════
-# The exposome is measured 2018–2022, so we use Jan 1 2019 as the landmark:
-#   - Events before 2019 are PREVALENT (diagnosis predates the study window)
-#     → these participants are excluded entirely, not just their events
-#   - Events on or after 2019 are INCIDENT → kept as outcome = 1
-#   - Participants with no event keep their censoring date
+# Landmark = Jan 1 2018 (start of the exposome measurement window).
 #
-# We also require EHR data active by Jan 1 2019 (from observation_period).
-# Someone who only enrolled in AoU in 2021 has no exposure history in the
-# study window and cannot contribute meaningful follow-up time from 2019.
+# ONLY exclusion criterion: coded MACE event before the landmark.
+# These are genuinely prevalent cases — the MI or stroke predates the
+# entire study window, so including them would mix prevalent disease
+# with the exposome exposure in a way that's not interpretable.
+#
+# We do NOT require EHR data to be present before 2018.
+# Reason: observation_period_start_date reflects when a health system
+# began submitting to AoU, not when the person first had healthcare.
+# A participant whose system joined AoU in 2021 may have no pre-2018
+# EHR records, but also no coded prior MACE — treating them as incident
+# is correct and conservative (if anything, we'll miss a small number
+# of truly prevalent cases whose prior events aren't in AoU, biasing
+# toward the null rather than inflating the effect).
 
-LANDMARK = pd.Timestamp('2019-01-01')
+LANDMARK = pd.Timestamp('2018-01-01')
 
 print("\n" + "=" * 60)
-print("STEP 4b: Incident-only filter — landmark Jan 1 2019")
+print("STEP 4b: Incident-only filter — landmark Jan 1 2018")
 print("=" * 60)
 
-n_before = len(cohort)
+n_before     = len(cohort)
 events_before = cohort['mace2_event'].sum()
 
-# Flag participants whose first MACE occurred before the landmark
+# Participants whose earliest coded MACE is before the landmark are excluded
 prevalent = cohort['mace2_event'] & (cohort['mace2_date'] < LANDMARK)
+
 print(f"\nBefore filtering:")
-print(f"  Total cohort:           {n_before:,}")
-print(f"  Any MACE (all time):    {events_before:,}  ({100*events_before/n_before:.1f}%)")
-print(f"  Prevalent cases (<2019): {prevalent.sum():,}  "
+print(f"  Total cohort:            {n_before:,}")
+print(f"  Any MACE (all time):     {events_before:,}  ({100*events_before/n_before:.1f}%)")
+print(f"  Prevalent cases (<2018): {prevalent.sum():,}  "
       f"({100*prevalent.sum()/events_before:.1f}% of all MACE events)")
 
-# Show year-by-year breakdown of MACE events so you can see the loss clearly
-print(f"\nMACE events by year (to see where the losses come from):")
+# Year-by-year breakdown
+print(f"\nMACE events by year:")
 mace_by_year = (cohort[cohort['mace2_event']]
                 .assign(year=cohort.loc[cohort['mace2_event'], 'mace2_date'].dt.year)
                 ['year'].value_counts().sort_index())
 for year, count in mace_by_year.items():
-    marker = '  ← excluded (prevalent)' if year < 2019 else ''
+    marker = '  ← excluded (prevalent)' if year < 2018 else ''
     print(f"  {year}: {count:,}{marker}")
 
-# Merge observation_period end dates to check EHR activity by landmark
-obs_genetic = obs_genetic.copy()
-obs_genetic['ehr_start'] = pd.to_datetime(obs_genetic['ehr_start'])
+# Single filter: remove prevalent cases only
+cohort_incident = cohort[~prevalent].copy()
 
-# Participants must have EHR data starting on or before the landmark
-has_ehr_by_landmark = set(
-    obs_genetic.loc[obs_genetic['ehr_start'] <= LANDMARK, 'person_id']
-)
-
-cohort['ehr_active_by_2019'] = cohort['person_id'].isin(has_ehr_by_landmark)
-no_ehr = ~cohort['ehr_active_by_2019']
-print(f"\nParticipants with no EHR data by Jan 2019: {no_ehr.sum():,}  "
-      f"({100*no_ehr.mean():.1f}%)")
-
-# Apply both filters:
-#   1. Remove prevalent MACE cases
-#   2. Remove participants with no EHR data by 2019
-cohort_incident = cohort[~prevalent & cohort['ehr_active_by_2019']].copy()
-
-# For incident cohort: if no event, mace2_date should be NaT (not a past date)
-# Events on/after landmark keep their date; no-event participants get NaT already
-
-n_after  = len(cohort_incident)
+n_after      = len(cohort_incident)
 events_after = cohort_incident['mace2_event'].sum()
 
 print(f"\nAfter incident filter:")
-print(f"  Total cohort:           {n_after:,}  (lost {n_before - n_after:,})")
-print(f"  Incident MACE events:   {events_after:,}  ({100*events_after/n_after:.1f}%)")
-print(f"  Lost events:            {events_before - events_after:,}")
+print(f"  Total cohort:            {n_after:,}  (lost {n_before - n_after:,} prevalent cases)")
+print(f"  Incident MACE events:    {events_after:,}  ({100*events_after/n_after:.1f}%)")
+print(f"  Events recovered vs 2019 landmark: +{events_after - 10487:,}  "
+      f"(2018 events now included)")
 print(f"\nSensitivity outcome in incident cohort:")
 sens_after = cohort_incident['mace3s_event'].sum()
-print(f"  Sensitivity MACE:       {sens_after:,}  ({100*sens_after/n_after:.1f}%)")
+print(f"  Sensitivity MACE:        {sens_after:,}  ({100*sens_after/n_after:.1f}%)")
 
 print("\n" + "=" * 60)
 print("STEP 5: Additional data availability in genetic cohort")
