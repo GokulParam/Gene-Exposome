@@ -262,51 +262,83 @@ print("\n" + "=" * 60)
 print("STEP 3c: Death records")
 print("=" * 60)
 
-# The `death` table has one row per deceased participant.
-# cause_concept_id is the OMOP concept for cause of death — this is often
-# NULL or coded as "Unknown" in EHR-derived data.
-# We separately flag CVD death using concept_ancestor on cardiovascular concepts.
+# CVD death ascertainment strategy:
+# The original concept_ancestor query using a single parent (4185932) only
+# returned 1 CVD death because the OMOP hierarchy in this CDR is incomplete —
+# concepts like "Cardiac arrest", "Heart failure", and "Cardiogenic shock"
+# are not connected as descendants of that parent.
+#
+# We use a two-pronged approach instead:
+#   (a) Explicit CVD cause concepts — a curated list of cardiovascular
+#       cause-of-death concept IDs that covers the concepts visibly present
+#       in this CDR's death table
+#   (b) 30-day post-MI/stroke proxy — any death within 30 days of a coded
+#       MI or stroke, regardless of recorded cause
+#
+# CVD death = (a) OR (b)
+# This is the 3rd component of 3-point MACE.
+#
+# LIMITATION (to state in paper): cause-of-death coding captures only a
+# fraction of true CVD deaths in EHR-derived data. The majority of deaths
+# (est. ~75%) have no cause recorded. Our CVD death component therefore
+# relies primarily on the 30-day proximity proxy, which is a standard
+# approach in EHR-based cardiovascular studies when NDI linkage is absent.
+
+# Cardiovascular cause-of-death concept IDs present in this CDR.
+# Identified empirically from the cause_of_death breakdown in Step 3c.
+# Covers: cardiac arrest, heart failure, cardiogenic shock, sudden cardiac
+# death, hypertensive heart disease, other CVD, cerebrovascular disease.
+CVD_CAUSE_CONCEPTS = (
+    321042,    # Cardiac arrest
+    4059796,   # Sudden cardiac death
+    316139,    # Heart failure
+    40479586,  # Cardiogenic shock
+    4108812,   # Other specified heart disease
+    312927,    # Hypertensive heart disease
+    4108814,   # Ischemic heart disease
+    443454,    # Cerebrovascular accident
+    432923,    # Hemorrhagic stroke
+    375557,    # Ischemic stroke
+    4185932,   # Cardiovascular disease (keep original, catches any mapped descendants)
+)
+
+cvd_concepts_sql = ', '.join(str(c) for c in CVD_CAUSE_CONCEPTS)
 
 death_query = f"""
 SELECT
     d.person_id,
     d.death_date,
     d.death_type_concept_id,
-    dt.concept_name AS death_type,       -- EHR, NDI, survey self-report, etc.
+    dt.concept_name AS death_type,
     d.cause_concept_id,
     cc.concept_name AS cause_of_death,
-    -- Flag if cause of death falls under cardiovascular disease (4185932)
+    -- (a) Explicit CVD cause: cause concept is in our curated CVD list
+    --     OR is a descendant of any concept in that list
     CASE
         WHEN ca.ancestor_concept_id IS NOT NULL THEN TRUE
         ELSE FALSE
-    END AS is_cvd_death
-FROM
-    `{CDR}.death` d
-LEFT JOIN `{CDR}.concept` dt
-    ON d.death_type_concept_id = dt.concept_id
-LEFT JOIN `{CDR}.concept` cc
-    ON d.cause_concept_id = cc.concept_id
--- Left join concept_ancestor to check if cause falls under CVD
+    END AS is_cvd_death_coded
+FROM `{CDR}.death` d
+LEFT JOIN `{CDR}.concept` dt  ON d.death_type_concept_id = dt.concept_id
+LEFT JOIN `{CDR}.concept` cc  ON d.cause_concept_id = cc.concept_id
 LEFT JOIN `{CDR}.concept_ancestor` ca
     ON d.cause_concept_id = ca.descendant_concept_id
-    AND ca.ancestor_concept_id = 4185932  -- Cardiovascular disease (SNOMED)
+    AND ca.ancestor_concept_id IN ({cvd_concepts_sql})
 """
 
 death_df = client.query(death_query).to_dataframe()
 death_df['person_id'] = death_df['person_id'].astype(str)
 death_genetic = death_df[death_df['person_id'].isin(prs_df['person_id'])].copy()
 
-print(f"Total deaths in genetic cohort:        {len(death_genetic):,}")
-print(f"  With a recorded cause concept:       {death_genetic['cause_concept_id'].notna().sum():,}")
-print(f"  CVD death (cause maps to CVD):       {death_genetic['is_cvd_death'].sum():,}")
-print(f"\nDeath type breakdown (data source):")
-print(death_genetic['death_type'].value_counts())
+print(f"Total deaths in genetic cohort:           {len(death_genetic):,}")
+print(f"  With any cause concept recorded:        {death_genetic['cause_concept_id'].notna().sum():,}")
+print(f"  With NULL cause (no coding):            {death_genetic['cause_concept_id'].isna().sum():,}")
+print(f"  CVD death (explicit cause coding):      {death_genetic['is_cvd_death_coded'].sum():,}")
 print(f"\nTop causes of death (where recorded):")
 print(death_genetic['cause_of_death'].value_counts().head(15))
 print(f"\nDate range of death records:")
 print(f"  Earliest: {death_genetic['death_date'].min()}")
 print(f"  Latest:   {death_genetic['death_date'].max()}")
-print(f"  Null dates: {death_genetic['death_date'].isna().sum()}")
 
 
 # ── 3d. Enrollment date (observation period start) ──────────────────────
@@ -345,28 +377,18 @@ print(obs_genetic['ehr_end'].describe())
 # STEP 4 — Build outcome flags and the cohort skeleton
 # ══════════════════════════════════════════════════════════════════════════
 #
-# PRIMARY OUTCOME — 2-point MACE (MI or stroke)
-#   Rationale: cause-of-death coding in this CDR version is essentially
-#   absent (only 1 CVD-coded death vs 4,482 all-cause deaths), so adding
-#   CVD death would introduce massive misclassification noise. MI and stroke
-#   are well-coded, date-stamped, and clinically coherent.
-#
-# SENSITIVITY OUTCOME — 2-point MACE + 30-day post-event death (proxy 3-pt)
-#   Rationale: a death occurring within 30 days of an MI or stroke is almost
-#   certainly a cardiovascular death even without a cause code. This is a
-#   standard EHR proxy used in the literature when NDI linkage is absent.
-#   Pre-specified as a sensitivity analysis, not the primary.
-#
-# CENSORING DATE — earliest of: last EHR observation date, all-cause death
-#   For participants without an event, follow-up ends at the last date the
-#   CDR has any record for them. We will merge observation_period end dates
-#   in the cleaning step; the skeleton stores death_date_any for now.
+# PRIMARY OUTCOME — 3-point MACE (MI, stroke, or CVD death)
+#   CVD death = explicitly coded CVD cause (from curated concept list)
+#               OR death within 30 days of a coded MI/stroke (proxy)
+#   Rationale: combines all identifiable CVD deaths from a CDR where
+#   cause-of-death coding is incomplete (~75% of deaths have no cause).
+#   The 30-day proxy is the dominant contributor; explicitly coded CVD
+#   deaths add the remainder. Stated as a limitation in the paper.
 
 print("\n" + "=" * 60)
 print("STEP 4: Outcome definition and cohort skeleton")
 print("=" * 60)
 
-# Start with all PRS participants
 cohort = prs_df[['person_id', 'cad_prs']].copy()
 
 # ── Merge MI ──────────────────────────────────────────────────────────────
@@ -377,72 +399,79 @@ cohort['has_mi'] = cohort['mi_date'].notna()
 cohort = cohort.merge(stroke_first, on='person_id', how='left')
 cohort['has_stroke'] = cohort['stroke_date'].notna()
 
-# ── All-cause death (used for censoring and the 30-day proxy) ─────────────
+# ── CVD death: explicitly coded ──────────────────────────────────────────
+cvd_death_coded = (
+    death_genetic[death_genetic['is_cvd_death_coded']]
+    [['person_id', 'death_date']]
+    .rename(columns={'death_date': 'cvd_death_date'})
+)
+cohort = cohort.merge(cvd_death_coded, on='person_id', how='left')
+cohort['has_cvd_death_coded'] = cohort['cvd_death_date'].notna()
+
+# ── All-cause death (censoring anchor) ────────────────────────────────────
 all_death = (death_genetic[['person_id', 'death_date']]
              .rename(columns={'death_date': 'death_date_any'}))
 cohort = cohort.merge(all_death, on='person_id', how='left')
 cohort['has_any_death'] = cohort['death_date_any'].notna()
 
-# ── Convert date columns to datetime64 ───────────────────────────────────
-# BigQuery returns datetime.date objects; left-merge NaN fills are float.
-# Everything must be datetime64 before any date arithmetic or row-wise min.
-for col in ['mi_date', 'stroke_date', 'death_date_any']:
+# ── Convert all date columns to datetime64 ────────────────────────────────
+for col in ['mi_date', 'stroke_date', 'cvd_death_date', 'death_date_any']:
     cohort[col] = pd.to_datetime(cohort[col], errors='coerce')
 
-# ── PRIMARY: 2-point MACE (MI or stroke) ──────────────────────────────────
-cohort['mace2_event'] = cohort['has_mi'] | cohort['has_stroke']
-cohort['mace2_date']  = cohort[['mi_date', 'stroke_date']].min(axis=1)
-
-# ── SENSITIVITY: 2-pt MACE + 30-day post-event death proxy ───────────────
-# A death is flagged as a probable CVD death if it occurs within 30 days
-# of the participant's first MI or stroke date.
-cohort['days_death_after_mace'] = (
-    cohort['death_date_any'] - cohort['mace2_date']
-).dt.days
-
-# 30-day proxy CVD death: died AND had a prior MACE event AND death was
-# within 30 days of that event (or on the same day).
+# ── 30-day post-MI/stroke death proxy ────────────────────────────────────
+# Used when no CVD cause is coded — death within 30 days of MI/stroke
+# is almost certainly cardiovascular.
+mace2_date_temp = cohort[['mi_date', 'stroke_date']].min(axis=1)
+days_to_death   = (cohort['death_date_any'] - mace2_date_temp).dt.days
 cohort['proxy_cvd_death'] = (
     cohort['has_any_death'] &
-    cohort['mace2_event'] &
-    (cohort['days_death_after_mace'] >= 0) &
-    (cohort['days_death_after_mace'] <= 30)
+    (mace2_date_temp.notna()) &
+    (days_to_death >= 0) &
+    (days_to_death <= 30)
 )
 
-# Sensitivity outcome: 2-pt MACE OR proxy CVD death
-# For participants where the death IS the event (died without prior coded
-# MI/stroke but within 30 days of an uncoded event), treat death date as
-# the event date. In practice these will mostly be the same people as
-# mace2_event since proxy_cvd_death requires a prior MACE code.
-cohort['mace3s_event'] = cohort['mace2_event'] | cohort['proxy_cvd_death']
-cohort['mace3s_date']  = cohort[['mace2_date', 'death_date_any']].min(axis=1)
-# For non-event participants, mace3s_date should be NaT not the death date
-cohort.loc[~cohort['mace3s_event'], 'mace3s_date'] = pd.NaT
+# ── PRIMARY: 3-point MACE ─────────────────────────────────────────────────
+cohort['has_cvd_death'] = cohort['has_cvd_death_coded'] | cohort['proxy_cvd_death']
+cohort['cvd_death_date_final'] = cohort[['cvd_death_date', 'death_date_any']].apply(
+    lambda row: row['death_date_any'] if (pd.isna(row['cvd_death_date']) and cohort.loc[row.name, 'proxy_cvd_death'])
+    else row['cvd_death_date'], axis=1
+)
+
+cohort['mace3_event'] = cohort['has_mi'] | cohort['has_stroke'] | cohort['has_cvd_death']
+cohort['mace3_date']  = cohort[['mi_date', 'stroke_date', 'cvd_death_date_final']].min(axis=1)
+cohort.loc[~cohort['mace3_event'], 'mace3_date'] = pd.NaT
 
 # ── Print the outcome summary ─────────────────────────────────────────────
 n = len(cohort)
 print(f"\nGenetic cohort N = {n:,}\n")
 
-print(f"{'Outcome':<45} {'N':>8} {'%':>7}")
-print("-" * 62)
-print(f"{'PRIMARY — 2-pt MACE (MI or stroke)':<45} "
-      f"{cohort['mace2_event'].sum():>8,} "
-      f"{100*cohort['mace2_event'].mean():>6.1f}%")
-print(f"{'  Myocardial Infarction (MI)':<45} "
+print(f"{'Outcome':<50} {'N':>8} {'%':>7}")
+print("-" * 67)
+print(f"{'3-pt MACE (MI + stroke + CVD death)':<50} "
+      f"{cohort['mace3_event'].sum():>8,} "
+      f"{100*cohort['mace3_event'].mean():>6.1f}%")
+print(f"{'  Myocardial Infarction (MI)':<50} "
       f"{cohort['has_mi'].sum():>8,} "
       f"{100*cohort['has_mi'].mean():>6.1f}%")
-print(f"{'  Stroke':<45} "
+print(f"{'  Stroke':<50} "
       f"{cohort['has_stroke'].sum():>8,} "
       f"{100*cohort['has_stroke'].mean():>6.1f}%")
-print(f"{'  MI + Stroke (overlap, counted once)':<45} "
+print(f"{'  CVD Death (coded + 30-day proxy)':<50} "
+      f"{cohort['has_cvd_death'].sum():>8,} "
+      f"{100*cohort['has_cvd_death'].mean():>6.1f}%")
+print(f"{'    of which: explicitly coded CVD cause':<50} "
+      f"{cohort['has_cvd_death_coded'].sum():>8,} "
+      f"{100*cohort['has_cvd_death_coded'].mean():>6.1f}%")
+print(f"{'    of which: 30-day post-MI/stroke proxy':<50} "
+      f"{cohort['proxy_cvd_death'].sum():>8,} "
+      f"{100*cohort['proxy_cvd_death'].mean():>6.1f}%")
+print(f"{'  MI + Stroke overlap (counted once)':<50} "
       f"{(cohort['has_mi'] & cohort['has_stroke']).sum():>8,} "
       f"{100*(cohort['has_mi'] & cohort['has_stroke']).mean():>6.1f}%")
 print()
-print(f"{'SENSITIVITY — adds 30-day post-event death':<45} "
-      f"{cohort['mace3s_event'].sum():>8,} "
-      f"{100*cohort['mace3s_event'].mean():>6.1f}%")
-print(f"{'  30-day proxy CVD deaths added':<45} "
-      f"{cohort['proxy_cvd_death'].sum():>8,} "
+print(f"{'All-cause death (any timing)':<50} "
+      f"{cohort['has_any_death'].sum():>8,} "
+      f"{100*cohort['has_any_death'].mean():>6.1f}%")
       f"{100*cohort['proxy_cvd_death'].mean():>6.1f}%")
 print()
 print(f"{'All-cause death (any timing)':<45} "
@@ -458,7 +487,7 @@ print(f"  SENSITIVITY events with a date: "
       f"{cohort['mace3s_event'].sum():,}")
 
 print(f"\nPrimary outcome date range:")
-mace_dates = cohort.loc[cohort['mace2_event'], 'mace2_date']
+mace_dates = cohort.loc[cohort['mace3_event'], 'mace3_date']
 print(f"  Earliest: {mace_dates.min().date()}")
 print(f"  Latest:   {mace_dates.max().date()}")
 
@@ -489,10 +518,10 @@ print("STEP 4b: Incident-only filter — landmark Jan 1 2018")
 print("=" * 60)
 
 n_before     = len(cohort)
-events_before = cohort['mace2_event'].sum()
+events_before = cohort['mace3_event'].sum()
 
 # Participants whose earliest coded MACE is before the landmark are excluded
-prevalent = cohort['mace2_event'] & (cohort['mace2_date'] < LANDMARK)
+prevalent = cohort['mace3_event'] & (cohort['mace3_date'] < LANDMARK)
 
 print(f"\nBefore filtering:")
 print(f"  Total cohort:            {n_before:,}")
@@ -502,8 +531,8 @@ print(f"  Prevalent cases (<2018): {prevalent.sum():,}  "
 
 # Year-by-year breakdown
 print(f"\nMACE events by year:")
-mace_by_year = (cohort[cohort['mace2_event']]
-                .assign(year=cohort.loc[cohort['mace2_event'], 'mace2_date'].dt.year)
+mace_by_year = (cohort[cohort['mace3_event']]
+                .assign(year=cohort.loc[cohort['mace3_event'], 'mace3_date'].dt.year)
                 ['year'].value_counts().sort_index())
 for year, count in mace_by_year.items():
     marker = '  ← excluded (prevalent)' if year < 2018 else ''
@@ -534,16 +563,13 @@ print(f"  Median age:        {cohort['age_at_landmark'].median():.0f}")
 cohort_incident = cohort[~prevalent & ~under_18].copy()
 
 n_after      = len(cohort_incident)
-events_after = cohort_incident['mace2_event'].sum()
+events_after = cohort_incident['mace3_event'].sum()
 
 print(f"\nAfter incident + age filter:")
 print(f"  Total cohort:            {n_after:,}  (lost {n_before - n_after:,})")
 print(f"    of which prevalent:    {prevalent.sum():,}")
 print(f"    of which <18 at 2018:  {under_18.sum():,}")
-print(f"  Incident MACE events:    {events_after:,}  ({100*events_after/n_after:.1f}%)")
-print(f"\nSensitivity outcome in incident cohort:")
-sens_after = cohort_incident['mace3s_event'].sum()
-print(f"  Sensitivity MACE:        {sens_after:,}  ({100*sens_after/n_after:.1f}%)")
+print(f"  Incident 3-pt MACE:      {events_after:,}  ({100*events_after/n_after:.1f}%)")
 
 print("\n" + "=" * 60)
 print("STEP 5: Additional data availability in genetic cohort")
@@ -652,15 +678,15 @@ print("AUDIT COMPLETE")
 print("=" * 60)
 print("""
 Outcome column reference for downstream scripts:
-  mace2_event      bool  — PRIMARY: MI or stroke (any)
-  mace2_date       date  — date of first primary MACE event
-  mace3s_event     bool  — SENSITIVITY: mace2 OR 30-day post-event death
-  mace3s_date      date  — date of first sensitivity MACE event
-  has_mi           bool  — MI component flag
-  mi_date          date  — date of first MI
-  has_stroke       bool  — stroke component flag
-  stroke_date      date  — date of first stroke
-  proxy_cvd_death  bool  — 30-day post-MACE death flag (sensitivity only)
+  mace3_event           bool  — PRIMARY: 3-pt MACE (MI, stroke, or CVD death)
+  mace3_date            date  — date of first MACE event
+  has_mi                bool  — MI component
+  mi_date               date  — date of first MI
+  has_stroke            bool  — stroke component
+  stroke_date           date  — date of first stroke
+  has_cvd_death         bool  — CVD death component (coded OR 30-day proxy)
+  has_cvd_death_coded   bool  — explicitly coded CVD cause only
+  proxy_cvd_death       bool  — 30-day post-MI/stroke death proxy
   has_any_death    bool  — any death recorded
   death_date_any   date  — date of death (for censoring)
 """)
