@@ -509,17 +509,38 @@ for year, count in mace_by_year.items():
     marker = '  ← excluded (prevalent)' if year < 2018 else ''
     print(f"  {year}: {count:,}{marker}")
 
-# Single filter: remove prevalent cases only
-cohort_incident = cohort[~prevalent].copy()
+# ── Age at landmark ───────────────────────────────────────────────────────
+# Use year_of_birth from the demographics pull (Step 2).
+# Age is calculated at the landmark date (Jan 1 2018), not current age,
+# because that's the eligibility point. year_of_birth is the only
+# resolution available in AoU, so age = 2018 - year_of_birth.
+# Participants born in 2000 turn 18 during 2018 — we keep them since
+# we only have birth year, not birth date.
+cohort = cohort.merge(
+    demo_genetic[['person_id', 'year_of_birth']].assign(
+        person_id=demo_genetic['person_id'].astype(str)
+    ),
+    on='person_id', how='left'
+)
+cohort['age_at_landmark'] = LANDMARK.year - cohort['year_of_birth']
+under_18 = cohort['age_at_landmark'] < 18
+
+print(f"\nAge at landmark (Jan 1 2018):")
+print(f"  Participants <18:  {under_18.sum():,}  ({100*under_18.mean():.2f}%)")
+print(f"  Min age in cohort: {cohort['age_at_landmark'].min()}")
+print(f"  Median age:        {cohort['age_at_landmark'].median():.0f}")
+
+# Apply both filters: remove prevalent cases AND under-18s
+cohort_incident = cohort[~prevalent & ~under_18].copy()
 
 n_after      = len(cohort_incident)
 events_after = cohort_incident['mace2_event'].sum()
 
-print(f"\nAfter incident filter:")
-print(f"  Total cohort:            {n_after:,}  (lost {n_before - n_after:,} prevalent cases)")
+print(f"\nAfter incident + age filter:")
+print(f"  Total cohort:            {n_after:,}  (lost {n_before - n_after:,})")
+print(f"    of which prevalent:    {prevalent.sum():,}")
+print(f"    of which <18 at 2018:  {under_18.sum():,}")
 print(f"  Incident MACE events:    {events_after:,}  ({100*events_after/n_after:.1f}%)")
-print(f"  Events recovered vs 2019 landmark: +{events_after - 10487:,}  "
-      f"(2018 events now included)")
 print(f"\nSensitivity outcome in incident cohort:")
 sens_after = cohort_incident['mace3s_event'].sum()
 print(f"  Sensitivity MACE:        {sens_after:,}  ({100*sens_after/n_after:.1f}%)")
