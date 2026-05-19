@@ -342,81 +342,125 @@ print(obs_genetic['ehr_end'].describe())
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# STEP 4 — Build the 3-point MACE summary table
+# STEP 4 — Build outcome flags and the cohort skeleton
 # ══════════════════════════════════════════════════════════════════════════
-# Merge all outcome flags onto the genetic cohort so you can see how many
-# participants have each combination of events.
+#
+# PRIMARY OUTCOME — 2-point MACE (MI or stroke)
+#   Rationale: cause-of-death coding in this CDR version is essentially
+#   absent (only 1 CVD-coded death vs 4,482 all-cause deaths), so adding
+#   CVD death would introduce massive misclassification noise. MI and stroke
+#   are well-coded, date-stamped, and clinically coherent.
+#
+# SENSITIVITY OUTCOME — 2-point MACE + 30-day post-event death (proxy 3-pt)
+#   Rationale: a death occurring within 30 days of an MI or stroke is almost
+#   certainly a cardiovascular death even without a cause code. This is a
+#   standard EHR proxy used in the literature when NDI linkage is absent.
+#   Pre-specified as a sensitivity analysis, not the primary.
+#
+# CENSORING DATE — earliest of: last EHR observation date, all-cause death
+#   For participants without an event, follow-up ends at the last date the
+#   CDR has any record for them. We will merge observation_period end dates
+#   in the cleaning step; the skeleton stores death_date_any for now.
 
 print("\n" + "=" * 60)
-print("STEP 4: MACE summary for genetic cohort")
+print("STEP 4: Outcome definition and cohort skeleton")
 print("=" * 60)
 
 # Start with all PRS participants
 cohort = prs_df[['person_id', 'cad_prs']].copy()
 
-# Merge MI flag + date
+# ── Merge MI ──────────────────────────────────────────────────────────────
 cohort = cohort.merge(mi_first, on='person_id', how='left')
 cohort['has_mi'] = cohort['mi_date'].notna()
 
-# Merge stroke flag + date
+# ── Merge stroke ──────────────────────────────────────────────────────────
 cohort = cohort.merge(stroke_first, on='person_id', how='left')
 cohort['has_stroke'] = cohort['stroke_date'].notna()
 
-# Merge CVD death flag + date
-cvd_death_first = (death_genetic[death_genetic['is_cvd_death']]
-                   [['person_id', 'death_date']]
-                   .rename(columns={'death_date': 'cvd_death_date'}))
-cohort = cohort.merge(cvd_death_first, on='person_id', how='left')
-cohort['has_cvd_death'] = cohort['cvd_death_date'].notna()
-
-# Also keep all-cause death date (useful for censoring in survival analysis)
-all_death = death_genetic[['person_id', 'death_date']].rename(
-    columns={'death_date': 'death_date_any'})
+# ── All-cause death (used for censoring and the 30-day proxy) ─────────────
+all_death = (death_genetic[['person_id', 'death_date']]
+             .rename(columns={'death_date': 'death_date_any'}))
 cohort = cohort.merge(all_death, on='person_id', how='left')
 cohort['has_any_death'] = cohort['death_date_any'].notna()
 
-# 3-point MACE: any of the three
-cohort['has_mace'] = cohort['has_mi'] | cohort['has_stroke'] | cohort['has_cvd_death']
-
-# Convert all date columns to datetime64 before taking row-wise min.
-# BigQuery returns datetime.date objects; NaN fills (from left-merge misses) are
-# float, so numpy's <= comparison blows up unless everything is the same dtype.
-for col in ['mi_date', 'stroke_date', 'cvd_death_date']:
+# ── Convert date columns to datetime64 ───────────────────────────────────
+# BigQuery returns datetime.date objects; left-merge NaN fills are float.
+# Everything must be datetime64 before any date arithmetic or row-wise min.
+for col in ['mi_date', 'stroke_date', 'death_date_any']:
     cohort[col] = pd.to_datetime(cohort[col], errors='coerce')
 
-# Earliest MACE date (for survival analysis)
-cohort['mace_date'] = cohort[['mi_date', 'stroke_date', 'cvd_death_date']].min(axis=1)
+# ── PRIMARY: 2-point MACE (MI or stroke) ──────────────────────────────────
+cohort['mace2_event'] = cohort['has_mi'] | cohort['has_stroke']
+cohort['mace2_date']  = cohort[['mi_date', 'stroke_date']].min(axis=1)
 
-# ── Print the summary ─────────────────────────────────────────────────────
+# ── SENSITIVITY: 2-pt MACE + 30-day post-event death proxy ───────────────
+# A death is flagged as a probable CVD death if it occurs within 30 days
+# of the participant's first MI or stroke date.
+cohort['days_death_after_mace'] = (
+    cohort['death_date_any'] - cohort['mace2_date']
+).dt.days
+
+# 30-day proxy CVD death: died AND had a prior MACE event AND death was
+# within 30 days of that event (or on the same day).
+cohort['proxy_cvd_death'] = (
+    cohort['has_any_death'] &
+    cohort['mace2_event'] &
+    (cohort['days_death_after_mace'] >= 0) &
+    (cohort['days_death_after_mace'] <= 30)
+)
+
+# Sensitivity outcome: 2-pt MACE OR proxy CVD death
+# For participants where the death IS the event (died without prior coded
+# MI/stroke but within 30 days of an uncoded event), treat death date as
+# the event date. In practice these will mostly be the same people as
+# mace2_event since proxy_cvd_death requires a prior MACE code.
+cohort['mace3s_event'] = cohort['mace2_event'] | cohort['proxy_cvd_death']
+cohort['mace3s_date']  = cohort[['mace2_date', 'death_date_any']].min(axis=1)
+# For non-event participants, mace3s_date should be NaT not the death date
+cohort.loc[~cohort['mace3s_event'], 'mace3s_date'] = pd.NaT
+
+# ── Print the outcome summary ─────────────────────────────────────────────
 n = len(cohort)
 print(f"\nGenetic cohort N = {n:,}\n")
 
-print(f"{'Outcome':<35} {'N':>8} {'%':>7}")
-print("-" * 52)
-print(f"{'Any 3-pt MACE':<35} {cohort['has_mace'].sum():>8,} {100*cohort['has_mace'].mean():>6.1f}%")
-print(f"{'  Myocardial Infarction (MI)':<35} {cohort['has_mi'].sum():>8,} {100*cohort['has_mi'].mean():>6.1f}%")
-print(f"{'  Stroke':<35} {cohort['has_stroke'].sum():>8,} {100*cohort['has_stroke'].mean():>6.1f}%")
-print(f"{'  CVD Death':<35} {cohort['has_cvd_death'].sum():>8,} {100*cohort['has_cvd_death'].mean():>6.1f}%")
-print(f"{'All-cause death':<35} {cohort['has_any_death'].sum():>8,} {100*cohort['has_any_death'].mean():>6.1f}%")
+print(f"{'Outcome':<45} {'N':>8} {'%':>7}")
+print("-" * 62)
+print(f"{'PRIMARY — 2-pt MACE (MI or stroke)':<45} "
+      f"{cohort['mace2_event'].sum():>8,} "
+      f"{100*cohort['mace2_event'].mean():>6.1f}%")
+print(f"{'  Myocardial Infarction (MI)':<45} "
+      f"{cohort['has_mi'].sum():>8,} "
+      f"{100*cohort['has_mi'].mean():>6.1f}%")
+print(f"{'  Stroke':<45} "
+      f"{cohort['has_stroke'].sum():>8,} "
+      f"{100*cohort['has_stroke'].mean():>6.1f}%")
+print(f"{'  MI + Stroke (overlap, counted once)':<45} "
+      f"{(cohort['has_mi'] & cohort['has_stroke']).sum():>8,} "
+      f"{100*(cohort['has_mi'] & cohort['has_stroke']).mean():>6.1f}%")
+print()
+print(f"{'SENSITIVITY — adds 30-day post-event death':<45} "
+      f"{cohort['mace3s_event'].sum():>8,} "
+      f"{100*cohort['mace3s_event'].mean():>6.1f}%")
+print(f"{'  30-day proxy CVD deaths added':<45} "
+      f"{cohort['proxy_cvd_death'].sum():>8,} "
+      f"{100*cohort['proxy_cvd_death'].mean():>6.1f}%")
+print()
+print(f"{'All-cause death (any timing)':<45} "
+      f"{cohort['has_any_death'].sum():>8,} "
+      f"{100*cohort['has_any_death'].mean():>6.1f}%")
 
-print(f"\nMACE component overlap:")
-mi_and_stroke    = (cohort['has_mi'] & cohort['has_stroke']).sum()
-mi_and_cvddeath  = (cohort['has_mi'] & cohort['has_cvd_death']).sum()
-str_and_cvddeath = (cohort['has_stroke'] & cohort['has_cvd_death']).sum()
-all_three        = (cohort['has_mi'] & cohort['has_stroke'] & cohort['has_cvd_death']).sum()
-print(f"  MI + Stroke:          {mi_and_stroke:,}")
-print(f"  MI + CVD death:       {mi_and_cvddeath:,}")
-print(f"  Stroke + CVD death:   {str_and_cvddeath:,}")
-print(f"  All three:            {all_three:,}")
+print(f"\nDate completeness:")
+print(f"  PRIMARY events with a date:     "
+      f"{cohort.loc[cohort['mace2_event'], 'mace2_date'].notna().sum():,} / "
+      f"{cohort['mace2_event'].sum():,}")
+print(f"  SENSITIVITY events with a date: "
+      f"{cohort.loc[cohort['mace3s_event'], 'mace3s_date'].notna().sum():,} / "
+      f"{cohort['mace3s_event'].sum():,}")
 
-print(f"\nDate availability for MACE events:")
-print(f"  MI with date:        {cohort['mi_date'].notna().sum():,} / {cohort['has_mi'].sum():,}")
-print(f"  Stroke with date:    {cohort['stroke_date'].notna().sum():,} / {cohort['has_stroke'].sum():,}")
-print(f"  CVD death with date: {cohort['cvd_death_date'].notna().sum():,} / {cohort['has_cvd_death'].sum():,}")
-
-print(f"\nMACE date range (for survival analysis feasibility):")
-print(f"  Earliest MACE:  {cohort['mace_date'].min()}")
-print(f"  Latest MACE:    {cohort['mace_date'].max()}")
+print(f"\nPrimary outcome date range:")
+mace_dates = cohort.loc[cohort['mace2_event'], 'mace2_date']
+print(f"  Earliest: {mace_dates.min().date()}")
+print(f"  Latest:   {mace_dates.max().date()}")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -481,11 +525,18 @@ print("\n" + "=" * 60)
 print("AUDIT COMPLETE")
 print("=" * 60)
 print("""
-Next decisions based on these numbers:
-  1. Is MACE prevalence high enough for XGBoost? (target: >2,000 events)
-  2. What % of MACE events have a usable date? (need >80% for survival analysis)
-  3. How far back does EHR data go? (affects prevalent vs incident case definition)
-  4. Are CVD deaths captured well enough, or should 2-pt MACE (MI+stroke) be primary?
+Outcome column reference for downstream scripts:
+  mace2_event      bool  — PRIMARY: MI or stroke (any)
+  mace2_date       date  — date of first primary MACE event
+  mace3s_event     bool  — SENSITIVITY: mace2 OR 30-day post-event death
+  mace3s_date      date  — date of first sensitivity MACE event
+  has_mi           bool  — MI component flag
+  mi_date          date  — date of first MI
+  has_stroke       bool  — stroke component flag
+  stroke_date      date  — date of first stroke
+  proxy_cvd_death  bool  — 30-day post-MACE death flag (sensitivity only)
+  has_any_death    bool  — any death recorded
+  death_date_any   date  — date of death (for censoring)
 """)
 
 # ── Save cohort skeleton for next steps ──────────────────────────────────
