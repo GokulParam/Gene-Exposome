@@ -489,8 +489,10 @@ Next decisions based on these numbers:
 """)
 
 # ── Save cohort skeleton for next steps ──────────────────────────────────
-save_path = f'{WORKSPACE}/cohort_skeleton.parquet'
-cohort.to_parquet(save_path, index=False)
+# Saving as CSV because AoU has pyarrow 9.x installed but pandas requires
+# pyarrow >=10 for parquet — CSV has no version dependency.
+save_path = f'{WORKSPACE}/cohort_skeleton.csv'
+cohort.to_csv(save_path, index=False)
 print(f"Cohort skeleton saved to: {save_path}")
 print(f"Shape: {cohort.shape}")
 print(f"Columns: {list(cohort.columns)}")
