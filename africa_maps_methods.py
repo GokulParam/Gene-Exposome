@@ -307,6 +307,40 @@ def save_map(fig, path):
     print(f"  ✓  {path}")
 
 
+def make_framed_africa_map():
+    """Return (fig, ax) for full-Africa view with a framed axes box —
+    matching africa_study_area_map.py exactly (10° ticks, degree symbols,
+    grid, thick spines, cropped at 37°S)."""
+    fig, ax = plt.subplots(figsize=(12, 14))
+    ax.set_xlabel("Longitude", fontsize=12, fontweight="bold")
+    ax.set_ylabel("Latitude",  fontsize=12, fontweight="bold")
+    ax.tick_params(axis="both", which="major", labelsize=10)
+    ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
+    ax.xaxis.set_major_locator(mticker.MultipleLocator(10))
+    ax.yaxis.set_major_locator(mticker.MultipleLocator(10))
+    ax.xaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda x, p: f"{x:.0f}°E" if x >= 0 else f"{abs(x):.0f}°W")
+    )
+    ax.yaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda y, p: f"{y:.0f}°N" if y >= 0 else f"{abs(y):.0f}°S")
+    )
+    for spine in ax.spines.values():
+        spine.set_visible(True)
+        spine.set_linewidth(1.5)
+        spine.set_edgecolor("black")
+    ax.set_xlim(africa_bounds[0] - 2, africa_bounds[2] + 2)
+    ax.set_ylim(-37, africa_bounds[3] + 2)
+    return fig, ax
+
+
+def save_framed_africa_map(fig, path):
+    fig.axes[0].set_aspect("equal")
+    plt.tight_layout()
+    fig.savefig(path, format="svg", bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"  ✓  {path}")
+
+
 def make_framed_study_map():
     """Return (fig, ax) for the study region with a visible axes box,
     lat/lon tick labels, degree symbols, and grid — matching heat_cvd_maps.py."""
@@ -374,7 +408,7 @@ print("\nRendering Köppen-Geiger map…")
 present_zones = set(gdf["koppen_zone"].dropna().unique())
 ordered_zones = [z for z in ZONE_ORDER if z in present_zones]
 
-fig, ax = make_map_figure()          # default = full Africa
+fig, ax = make_framed_africa_map()
 draw_africa(ax)
 
 for zone in ordered_zones:
@@ -390,7 +424,7 @@ for zone in ordered_zones:
 
 draw_country_borders(ax)
 draw_study_outline(ax)
-save_map(fig, OUTPUTS["koppen_map"])
+save_framed_africa_map(fig, OUTPUTS["koppen_map"])
 
 # ── Legend 1 ──────────────────────────────────────────────────────────────
 print("Rendering Köppen legend…")
