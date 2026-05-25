@@ -307,6 +307,38 @@ def save_map(fig, path):
     print(f"  ✓  {path}")
 
 
+def make_framed_study_map():
+    """Return (fig, ax) for the study region with a visible axes box,
+    lat/lon tick labels, degree symbols, and grid — matching heat_cvd_maps.py."""
+    fig, ax = plt.subplots(figsize=(12, 10))
+    ax.set_xlim(raw_bounds[0] - 0.5, raw_bounds[2] + 0.5)
+    ax.set_ylim(raw_bounds[1] - 0.5, raw_bounds[3] + 0.5)
+    ax.set_xlabel("Longitude", fontsize=12, fontweight="bold")
+    ax.set_ylabel("Latitude",  fontsize=12, fontweight="bold")
+    ax.tick_params(axis="both", which="major", labelsize=10)
+    ax.grid(True, alpha=0.3, linestyle="--", linewidth=0.5)
+    ax.xaxis.set_major_locator(mticker.MultipleLocator(5))
+    ax.yaxis.set_major_locator(mticker.MultipleLocator(5))
+    ax.xaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda x, p: f"{x:.0f}°E" if x >= 0 else f"{abs(x):.0f}°W")
+    )
+    ax.yaxis.set_major_formatter(
+        mticker.FuncFormatter(lambda y, p: f"{y:.0f}°N" if y >= 0 else f"{abs(y):.0f}°S")
+    )
+    for spine in ax.spines.values():
+        spine.set_visible(True)
+        spine.set_linewidth(1.5)
+        spine.set_edgecolor("black")
+    return fig, ax
+
+
+def save_framed_map(fig, path):
+    plt.tight_layout()
+    fig.savefig(path, format="svg", bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    print(f"  ✓  {path}")
+
+
 def save_colorbar(sm, label, ticks, tick_labels, path_h, path_v):
     """Save both a horizontal and a vertical colourbar legend."""
     # ── Horizontal ────────────────────────────────────────────────────────
@@ -406,20 +438,18 @@ tmrel_p10  = float(np.percentile(tmrel_vals, 10))
 tmrel_p90  = float(np.percentile(tmrel_vals, 90))
 norm_tmrel = Normalize(vmin=tmrel_p10, vmax=tmrel_p90)
 
-fig, ax = make_map_figure(xlim=STUDY_XLIM, ylim=STUDY_YLIM, figsize=(13, 12))
-draw_africa(ax)
+fig, ax = make_framed_study_map()
 gdf.plot(
     ax=ax,
     column="TMREL",
     cmap=CMAP_TMREL,
     norm=norm_tmrel,
-    edgecolor="none",
-    linewidth=0,
-    zorder=2,
+    linewidth=0.05,
+    edgecolor="face",
+    zorder=1,
 )
-draw_country_borders(ax)
-draw_study_outline(ax)
-save_map(fig, OUTPUTS["tmrel_map"])
+study_countries_gdf.boundary.plot(ax=ax, linewidth=0.8, edgecolor="#333333", zorder=2)
+save_framed_map(fig, OUTPUTS["tmrel_map"])
 
 # ── Legends 2 (H + V) ─────────────────────────────────────────────────────
 print("Rendering TMREL legends…")
@@ -450,20 +480,18 @@ paf_p10  = float(np.percentile(paf_vals, 10))
 paf_p90  = float(np.percentile(paf_vals, 90))
 norm_paf = Normalize(vmin=paf_p10, vmax=paf_p90)
 
-fig, ax = make_map_figure(xlim=STUDY_XLIM, ylim=STUDY_YLIM, figsize=(13, 12))
-draw_africa(ax)
+fig, ax = make_framed_study_map()
 gdf.plot(
     ax=ax,
     column="paf_median",
     cmap=CMAP_PAF,
     norm=norm_paf,
-    edgecolor="none",
-    linewidth=0,
-    zorder=2,
+    linewidth=0.05,
+    edgecolor="face",
+    zorder=1,
 )
-draw_country_borders(ax)
-draw_study_outline(ax)
-save_map(fig, OUTPUTS["paf_map"])
+study_countries_gdf.boundary.plot(ax=ax, linewidth=0.8, edgecolor="#333333", zorder=2)
+save_framed_map(fig, OUTPUTS["paf_map"])
 
 # ── Legends 3 (H + V) ─────────────────────────────────────────────────────
 print("Rendering PAF legends…")
