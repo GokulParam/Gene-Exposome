@@ -188,6 +188,10 @@ gdf = gdf.merge(
     on="grid_id", how="left"
 )
 
+# Capture the full GeoJSON extent NOW – this is the authoritative study-region
+# bounding box and must be saved before any geometry operations alter the data.
+raw_bounds = gdf.total_bounds   # [minx, miny, maxx, maxy]
+
 # ──────────────────────────────────────────────────────────────────────────
 # 3. LOAD AFRICA BACKGROUND
 # ──────────────────────────────────────────────────────────────────────────
@@ -201,9 +205,12 @@ world = gpd.read_file(io.BytesIO(resp.content))
 africa = world[world["ISO3166-1-Alpha-3"].isin(AFRICA_ISO3)].copy()
 africa = africa.set_crs("EPSG:4326", allow_override=True)
 
-# Study countries – used for clipping and drawing country borders
-study_countries_gdf = africa[africa["ISO3166-1-Alpha-3"].isin(STUDY_ISO3)].copy()
-study_union = study_countries_gdf.geometry.union_all()
+# Identify study countries spatially – every Africa country that intersects the
+# grid footprint is included.  This avoids ISO-3 code mismatches dropping entire
+# countries from the clip polygon and leaving gaps in the rendered map.
+grid_footprint      = gdf.dissolve().geometry.union_all()
+study_countries_gdf = africa[africa.geometry.intersects(grid_footprint)].copy()
+study_union         = study_countries_gdf.geometry.union_all()
 
 # ── Clip grid cells to country boundaries for smooth edges ────────────────
 print("Clipping grid cells to country boundaries…")
@@ -240,11 +247,12 @@ pad_africa    = 2.5
 XLIM = (africa_bounds[0] - pad_africa, africa_bounds[2] + pad_africa)
 YLIM = (africa_bounds[1] - pad_africa, africa_bounds[3] + pad_africa)
 
-# TMREL / PAF: zoom to the study region only
-study_bounds = study_countries_gdf.total_bounds
-pad_study    = 1.5
-STUDY_XLIM   = (study_bounds[0] - pad_study, study_bounds[2] + pad_study)
-STUDY_YLIM   = (study_bounds[1] - pad_study, study_bounds[3] + pad_study)
+# TMREL / PAF: derived from the raw GeoJSON bounds (saved before any clipping)
+# so the view always covers the complete study region regardless of which
+# countries the downloaded shapefile matched.
+pad_study  = 0.8
+STUDY_XLIM = (raw_bounds[0] - pad_study, raw_bounds[2] + pad_study)
+STUDY_YLIM = (raw_bounds[1] - pad_study, raw_bounds[3] + pad_study)
 
 # ──────────────────────────────────────────────────────────────────────────
 # 4. HELPER: base map drawing
