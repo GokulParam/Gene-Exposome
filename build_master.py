@@ -61,6 +61,7 @@ MED_FLAGS = [
                        1592085,  # lovastatin
                        1549686,  # fluvastatin
                        40165636]),# pitavastatin
+    ('pcsk9i',        [0]),       # evolocumab + alirocumab — verify IDs via concept_id_lookup.py Section C
     ('ace_inhibitor', [1308216,  # lisinopril
                        1334456,  # ramipril
                        1341927,  # enalapril
@@ -210,7 +211,7 @@ BINARY_COLS = [
     'mace3_event', 'has_mi', 'has_stroke', 'has_cvd_death', 'has_any_death',
     'htn', 't2dm', 'obesity_dx', 'cad_prev', 'ckd', 'current_smoker',
     # medications
-    'statin', 'ace_inhibitor', 'arb', 'beta_blocker', 'ccb', 'diuretic',
+    'statin', 'pcsk9i', 'ace_inhibitor', 'arb', 'beta_blocker', 'ccb', 'diuretic',
     'aspirin', 'p2y12', 'oral_anticoag', 'arni',
     'metformin', 'sglt2i', 'glp1ra', 'dpp4i', 'sulfonylurea', 'tzd', 'insulin_any',
     'any_antihtn', 'any_dm_med',

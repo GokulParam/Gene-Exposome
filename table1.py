@@ -47,7 +47,7 @@ CORE = [
     # pregnancy-related
     'preeclampsia', 'gest_dm', 'preterm', 'preg_loss',
     # medications
-    'statin', 'ace_inhibitor', 'arb', 'beta_blocker', 'ccb', 'diuretic',
+    'statin', 'pcsk9i', 'ace_inhibitor', 'arb', 'beta_blocker', 'ccb', 'diuretic',
     'any_antihtn', 'aspirin', 'p2y12', 'oral_anticoag', 'arni',
     'metformin', 'sglt2i', 'glp1ra', 'dpp4i', 'sulfonylurea', 'tzd', 'insulin_any',
     'any_dm_med',
@@ -219,7 +219,8 @@ for col, label in [
 print(f"\n\nMEDICATIONS (any use, any time)\n{S}")
 print(f"  {'Lipid-lowering'}")
 for col, label in [
-    ('statin',        '  Statin (any)'),
+    ('statin',  '  Statin (any)'),
+    ('pcsk9i',  '  PCSK9 inhibitor (evolocumab / alirocumab)'),
 ]:
     if col in master.columns:
         print(f"  {label:<42} {pct(col)}")

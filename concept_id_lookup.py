@@ -128,6 +128,10 @@ RXNORM_LOOKUP = {
 
     # ── ARNI ────────────────────────────────────────────────────────────────
     'sacubitril':     ('1657973', 'Sacubitril'),
+
+    # ── PCSK9 inhibitors ────────────────────────────────────────────────────
+    'evolocumab':     ('1860484', 'Evolocumab'),
+    'alirocumab':     ('1860485', 'Alirocumab'),
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -290,6 +294,28 @@ WHERE concept_id = 40443308
 print(client.query(q_pcos).to_dataframe().to_string(index=False))
 
 print(f'\n{SEP}')
+print('Direct lookup of unverified concept IDs in build_master.py / CELL 4:')
+print(SEP)
+for cid, label in [
+    (4024659,  'gest_dm  (gestational diabetes — CELL 4 comorbidities_diagnostic)'),
+    (46271022, 'ckd      (chronic kidney disease — CELL 4)'),
+]:
+    q_chk = f"""
+    SELECT concept_id, concept_name, domain_id, vocabulary_id, concept_code, standard_concept
+    FROM `{CDR}.concept`
+    WHERE concept_id = {cid}
+    """
+    row = client.query(q_chk).to_dataframe()
+    if len(row):
+        r = row.iloc[0]
+        print(f"  {cid:>10,}  [{label}]")
+        print(f"           → '{r['concept_name']}'  domain={r['domain_id']}  "
+              f"vocab={r['vocabulary_id']}  code={r['concept_code']}  standard={r['standard_concept']}")
+    else:
+        print(f"  {cid:>10,}  [{label}]  → *** NOT FOUND ***")
+
+print(f'\n{SEP}')
 print('SECTION D COMPLETE')
 print('Use the correct concept IDs above to fix CELL 2 CVD death definition')
 print('PCOS: confirm concept_id 40443308 is correct before re-running build_master.py')
+print('PCSK9i: check Section C output for evolocumab/alirocumab concept IDs')
