@@ -114,48 +114,45 @@ ANY_ANTIHTN_COLS = ['ace_inhibitor', 'arb', 'beta_blocker', 'ccb', 'diuretic']
 # expands to all descendant codes.  Run comorbidities_diagnostic.py first to
 # verify IDs against this CDR version before trusting counts.
 COND_FLAGS = [
-    # ── Verified against CDR concept table ──────────────────────────────────
     # Very High Risk
-    ('t1dm',             [201254]),   # Type 1 diabetes mellitus
-    ('pad',              [321052]),   # Peripheral vascular disease
+    ('t1dm',             [201254]),            # Type 1 diabetes mellitus
+    ('fh',               [4134862]),           # Familial hypercholesterolemia (SNOMED 398036000)
+    ('pad',              [321052]),            # Peripheral vascular disease
 
     # High Risk
-    ('heart_failure',    [316139]),   # Heart failure
-    ('afib',             [313217]),   # Atrial fibrillation
+    ('metabolic_syndrome', [436940]),          # Metabolic syndrome X (SNOMED 237602007)
+    ('osa',              [442588]),            # Obstructive sleep apnea syndrome (SNOMED 78275009)
+    ('heart_failure',    [316139]),            # Heart failure
+    ('afib',             [313217]),            # Atrial fibrillation
 
     # Inflammatory / Autoimmune
-    ('ra',               [80809]),    # Rheumatoid arthritis
-    ('psoriasis',        [140168]),   # Psoriasis
-    ('crohns',           [201606]),   # Crohn's disease  ← was sle, confirmed correct
-    ('hiv',              [439727]),   # Human immunodeficiency virus infection
+    ('ra',               [80809]),             # Rheumatoid arthritis
+    ('sle',              [257628]),            # Systemic lupus erythematosus (SNOMED 55464009)
+    ('psoriasis',        [140168]),            # Psoriasis
+    ('crohns',           [201606]),            # Crohn's disease
+    ('ulc_colitis',      [81893]),             # Ulcerative colitis (SNOMED 64766004)
+    ('hiv',              [439727]),            # Human immunodeficiency virus infection
 
-    # Endocrine
-    ('hypothyroidism',   [140673]),   # Hypothyroidism
+    # Endocrine / Hormonal
+    ('hypothyroidism',   [140673]),            # Hypothyroidism
+    ('hyperthyroidism',  [4142479]),           # Hyperthyroidism (SNOMED 34486009)
+    ('pcos',             [40443308]),          # Polycystic ovary syndrome (SNOMED 237055002)
+    ('cushings',         [195212]),            # Hypercortisolism / Cushing's syndrome (SNOMED 47270006)
+    ('acromegaly',       [4253197]),           # Acromegaly (SNOMED 74107003)
 
-    # Pregnancy-related
-    ('gest_dm',          [4024659]),  # Gestational diabetes mellitus
-    ('preg_loss',        [4067106]),  # Miscarriage / pregnancy loss
-
-    # ── Pending: run concept_id_lookup.py and replace 0s with real IDs ──────
-    # (flagged ✗ MISMATCH in comorbidities_diagnostic.py)
-    ('fh',               [0]),        # Familial hypercholesterolaemia — SNOMED 398036000
-    ('metabolic_syndrome',[0]),       # Metabolic syndrome — SNOMED 237602007
-    ('osa',              [0]),        # Obstructive sleep apnea — SNOMED 78275009
-    ('sle',              [0]),        # Systemic lupus erythematosus — SNOMED 55464009
-    ('ulc_colitis',      [0]),        # Ulcerative colitis — SNOMED 64766004
-    ('hyperthyroidism',  [0]),        # Hyperthyroidism — SNOMED 34486009
-    ('pcos',             [0]),        # Polycystic ovary syndrome — SNOMED 69878008
-    ('cushings',         [0]),        # Cushing's syndrome — SNOMED 47270006
-    ('acromegaly',       [0]),        # Acromegaly — SNOMED 74107003
-    ('preeclampsia',     [0]),        # Pre-eclampsia + eclampsia — SNOMED 398254007 / 15938005
-    ('preterm',          [0]),        # Preterm delivery — SNOMED 282020008
+    # Pregnancy-related (coded 0 for males)
+    ('preeclampsia',     [439393, 443700]),    # Pre-eclampsia (SNOMED 398254007) + eclampsia (15938005)
+    ('gest_dm',          [4024659]),           # Gestational diabetes mellitus
+    ('preterm',          [4086393]),           # Premature delivery (SNOMED 282020008)
+    ('preg_loss',        [4067106]),           # Miscarriage / pregnancy loss
 ]
 
 CHEMO_FLAGS = [
-    # Cardiotoxic chemotherapy — pending concept_id_lookup.py output
-    # RxNorm CUIs: doxorubicin=3151, epirubicin=41867, daunorubicin=3002,
-    #              idarubicin=27340, trastuzumab=224905
-    ('cardiotoxic_chemo', [0]),       # Replace 0 with correct concept IDs after lookup
+    # Cardiotoxic chemotherapy — anthracyclines + trastuzumab
+    # Daunorubicin and idarubicin not found as standard RxNorm ingredients in this CDR
+    ('cardiotoxic_chemo', [1338512,   # doxorubicin  (RxNorm 3639)
+                           1344354,   # epirubicin   (RxNorm 3995)
+                           1387104]), # trastuzumab  (RxNorm 224905)
 ]
 
 # IBD composite (Crohn's OR UC) — derived after COND_FLAGS built
