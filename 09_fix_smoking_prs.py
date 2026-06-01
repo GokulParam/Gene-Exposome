@@ -1,12 +1,15 @@
 """
 CELL 9 — Fix smoking variable and z-score PRS columns
 ======================================================
-1. Re-query smoking using correct concept 40766307
-   ("Do you now smoke cigarettes every day, some days, or not at all")
-   current_smoker = 1 if most recent answer before 2018-01-01 is
-   "Every day" OR "Some days"
-2. Z-score all five PRS columns so coefficients are on comparable scales
-3. Overwrite master_dataset.csv and copy to bucket
+Memory-safe: uses chunked CSV processing so the full 148 MB file is
+never loaded into RAM at once.
+
+Steps:
+  1. Query CDR for correct smoking status (concept 40766307)
+  2. Compute PRS z-score params from a tiny single-column pass
+  3. Stream master_dataset.csv through in 50k-row chunks, patching
+     current_smoker and PRS columns, writing to a new file
+  4. Replace original and copy to bucket
 """
 
 import os, gc, subprocess
@@ -14,39 +17,29 @@ import pandas as pd
 import numpy as np
 from google.cloud import bigquery
 
-WORKSPACE = '/home/dataproc/workspaces/geneexposome'
-CDR       = 'wb-silky-artichoke-2408.C2024Q3R9'
-BUCKET    = 'gs://rw-migration-aou-rw-6cad436b'
-LANDMARK  = '2018-01-01'
-client    = bigquery.Client(project='wb-shining-lemon-5239')
+WORKSPACE  = '/home/dataproc/workspaces/geneexposome'
+CDR        = 'wb-silky-artichoke-2408.C2024Q3R9'
+BUCKET     = 'gs://rw-migration-aou-rw-6cad436b'
+LANDMARK   = '2018-01-01'
+CHUNKSIZE  = 50_000
+client     = bigquery.Client(project='wb-shining-lemon-5239')
 
-# ── Load full master with float32 to halve RAM usage ─────────────────────────
-print("Loading master_dataset.csv (float32) ...")
-master = pd.read_csv(
-    f'{WORKSPACE}/master_dataset.csv',
-    dtype={'person_id': str},
-    low_memory=False,
-)
-for c in master.select_dtypes('float64').columns:
-    master[c] = master[c].astype('float32')
-print(f"  {len(master):,} rows × {master.shape[1]} cols")
-gc.collect()
+IN_PATH    = f'{WORKSPACE}/master_dataset.csv'
+OUT_PATH   = f'{WORKSPACE}/master_dataset_fixed.csv'
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# FIX 1 — Smoking
+# STEP 1 — Get correct smoking status from CDR
 # ═════════════════════════════════════════════════════════════════════════════
-print("\n" + "=" * 60)
-print("FIX 1: Current smoker (concept 40766307)")
+print("=" * 60)
+print("STEP 1: Query smoking status (concept 40766307)")
 print("=" * 60)
 
-# Pull most recent answer per person before landmark
 q_smoke = f"""
 WITH ranked AS (
     SELECT
         CAST(o.person_id AS STRING) AS person_id,
         c_val.concept_name AS answer,
-        o.observation_date,
         ROW_NUMBER() OVER (
             PARTITION BY o.person_id
             ORDER BY o.observation_date DESC
@@ -57,77 +50,103 @@ WITH ranked AS (
       AND o.observation_date < '{LANDMARK}'
       AND o.value_as_concept_id IS NOT NULL
 )
-SELECT person_id, answer, observation_date
-FROM ranked
-WHERE rn = 1
+SELECT person_id, answer
+FROM ranked WHERE rn = 1
 """
 smoke_df = client.query(q_smoke).to_dataframe()
 smoke_df['person_id'] = smoke_df['person_id'].astype(str)
-print(f"\nPeople with smoking answer before landmark: {len(smoke_df):,}")
-print("\nAnswer breakdown (most recent pre-landmark):")
+print(f"\nPeople with answer before landmark: {len(smoke_df):,}")
+print("\nAnswer breakdown:")
 print(smoke_df['answer'].value_counts().to_string())
 
-# Current smoker = "Every day" or "Some days"
-current_ids = set(
-    smoke_df.loc[
-        smoke_df['answer'].str.contains('every day|some day', case=False, na=False),
-        'person_id'
-    ]
-)
-master['current_smoker'] = master['person_id'].isin(current_ids).astype('int8')
+# Build lookup: person_id → 0/1
+smoke_df['current_smoker_new'] = smoke_df['answer'].str.contains(
+    'every day|some day', case=False, na=False
+).astype('int8')
 
-n_current  = master['current_smoker'].sum()
-n_answered = master['person_id'].isin(smoke_df['person_id']).sum()
-print(f"\nUpdated current_smoker:")
-print(f"  Answered before landmark : {n_answered:>7,}  ({100*n_answered/len(master):.1f}%)")
-print(f"  Current smoker           : {n_current:>7,}  ({100*n_current/len(master):.1f}%)")
-print(f"  Non/former smoker        : {n_answered-n_current:>7,}")
-print(f"  No smoking data (→ 0)    : {len(master)-n_answered:>7,}")
+smoking_map = smoke_df.set_index('person_id')['current_smoker_new']
+n_current = smoking_map.sum()
+print(f"\nCurrent smokers (every day + some days): {n_current:,} "
+      f"({100*n_current/len(smoke_df):.1f}% of those who answered)")
 
-del smoke_df, current_ids
+del smoke_df
 gc.collect()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# FIX 2 — Z-score PRS columns
+# STEP 2 — Compute PRS z-score parameters (tiny pass — 6 cols only)
 # ═════════════════════════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
-print("FIX 2: Z-score PRS columns")
+print("STEP 2: Compute PRS z-score parameters")
 print("=" * 60)
 
-prs_cols = [c for c in master.columns if c.startswith('prs_') or c == 'cad_prs']
-print(f"\n{'Column':<20} {'raw_mean':>12} {'raw_sd':>12}")
-print("─" * 46)
+all_cols = pd.read_csv(IN_PATH, nrows=0).columns.tolist()
+prs_cols = [c for c in all_cols if c.startswith('prs_') or c == 'cad_prs']
+print(f"PRS columns: {prs_cols}")
+
+prs_df = pd.read_csv(IN_PATH, usecols=prs_cols, dtype='float32')
+prs_params = {}
 for col in prs_cols:
-    s  = master[col].dropna().astype('float64')  # float64 for precision during z-score
-    mu = float(s.mean())
-    sd = float(s.std())
-    master[col] = ((master[col].astype('float64') - mu) / sd).astype('float32')
-    print(f"  {col:<18} {mu:>12.3f} {sd:>12.3f}")
+    s = prs_df[col].dropna().astype('float64')
+    prs_params[col] = (float(s.mean()), float(s.std()))
+    print(f"  {col:<20}  mean={prs_params[col][0]:>12.3f}  sd={prs_params[col][1]:>10.3f}")
 
-print("\nPost-z-score sanity check (mean≈0, sd≈1):")
-for col in prs_cols:
-    s = master[col].dropna()
-    print(f"  {col:<20}  mean={s.mean():+.4f}  sd={s.std():.4f}")
-
-
-# ═════════════════════════════════════════════════════════════════════════════
-# Save
-# ═════════════════════════════════════════════════════════════════════════════
-print("\n" + "=" * 60)
-print("Saving master_dataset.csv")
-print("=" * 60)
-
-out_path = f'{WORKSPACE}/master_dataset.csv'
-master.to_csv(out_path, index=False)
-size_mb = os.path.getsize(out_path) / 1e6
-print(f"  Saved: {out_path}  ({size_mb:.1f} MB)")
-
-del master
+del prs_df
 gc.collect()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# STEP 3 — Stream CSV in chunks, patch columns, write new file
+# ═════════════════════════════════════════════════════════════════════════════
+print("\n" + "=" * 60)
+print("STEP 3: Patch master_dataset.csv in chunks")
+print("=" * 60)
+
+reader    = pd.read_csv(IN_PATH, dtype={'person_id': str}, chunksize=CHUNKSIZE,
+                        low_memory=False)
+first     = True
+rows_done = 0
+
+for chunk in reader:
+    # Downcast floats to save memory within chunk
+    for c in chunk.select_dtypes('float64').columns:
+        chunk[c] = chunk[c].astype('float32')
+
+    # Patch current_smoker
+    new_val = chunk['person_id'].map(smoking_map)   # NaN where no survey answer
+    chunk['current_smoker'] = new_val.fillna(0).astype('int8')
+
+    # Z-score PRS
+    for col in prs_cols:
+        mu, sd = prs_params[col]
+        chunk[col] = ((chunk[col].astype('float64') - mu) / sd).astype('float32')
+
+    # Write
+    chunk.to_csv(OUT_PATH, mode='w' if first else 'a',
+                 header=first, index=False)
+    first      = False
+    rows_done += len(chunk)
+    print(f"  {rows_done:,} rows written ...", end='\r')
+
+print(f"\n  Done. {rows_done:,} rows total.")
+
+del smoking_map, prs_params
+gc.collect()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# STEP 4 — Replace original file and copy to bucket
+# ═════════════════════════════════════════════════════════════════════════════
+print("\n" + "=" * 60)
+print("STEP 4: Replace original and upload to bucket")
+print("=" * 60)
+
+os.replace(OUT_PATH, IN_PATH)
+size_mb = os.path.getsize(IN_PATH) / 1e6
+print(f"  master_dataset.csv updated  ({size_mb:.1f} MB)")
 
 result = subprocess.run(
-    ['gsutil', 'cp', out_path, f'{BUCKET}/master_dataset.csv'],
+    ['gsutil', 'cp', IN_PATH, f'{BUCKET}/master_dataset.csv'],
     capture_output=True, text=True, timeout=300,
 )
 if result.returncode == 0:
@@ -136,5 +155,5 @@ else:
     print(f"  gsutil cp failed: {result.stderr}")
 
 print("\n" + "=" * 60)
-print("DONE")
+print("DONE — re-run 07_table1.py to verify")
 print("=" * 60)
