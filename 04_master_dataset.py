@@ -236,10 +236,15 @@ for fname, prefix in exposome_files.items():
                            .str.extract(r'(\d+)', expand=False)
                            .str.zfill(3))
 
-    # Drop the original zip column (we'll drop _exp_zip after merge)
-    # Rename remaining columns to avoid clashes
-    non_zip_cols = [c for c in exp_df.columns if c not in (zip_col, '_exp_zip')]
-    rename_map   = {c: f'{prefix}_{c}' for c in non_zip_cols}
+    # Drop ALL zip-like columns from exp_df — we use _exp_zip as the merge key.
+    # This prevents 'zip3' in exp_df clashing with master['zip3'].
+    all_zip_cols = [c for c in exp_df.columns
+                    if 'zip' in c.lower() and c != '_exp_zip']
+    exp_df = exp_df.drop(columns=all_zip_cols, errors='ignore')
+
+    # Rename remaining data columns to avoid clashes with master columns
+    non_key_cols = [c for c in exp_df.columns if c != '_exp_zip']
+    rename_map   = {c: f'{prefix}_{c}' for c in non_key_cols}
     exp_df = exp_df.rename(columns=rename_map)
 
     # Downcast
@@ -252,7 +257,8 @@ for fname, prefix in exposome_files.items():
     master = master.merge(exp_df, left_on='_zip3_key', right_on='_exp_zip', how='left')
     master = master.drop(columns=['_exp_zip'], errors='ignore')
 
-    n_matched = master[f'{prefix}_{non_zip_cols[0]}'].notna().sum() if non_zip_cols else 0
+    prefixed_cols = [c for c in master.columns if c.startswith(f'{prefix}_')]
+    n_matched = master[prefixed_cols[0]].notna().sum() if prefixed_cols else 0
     print(f"    Rows: {len(master):,} | New cols added: {master.shape[1]-before_cols} "
           f"| Matched rows: {n_matched:,}")
 
