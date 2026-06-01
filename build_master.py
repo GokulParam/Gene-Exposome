@@ -97,11 +97,11 @@ MED_FLAGS = [
                        932745]), # bumetanide
     ('aspirin',       [1112807]),
     ('p2y12',         [1322184,  # clopidogrel
-                       40163924]),# ticagrelor
+                       40241186]),# ticagrelor (RxNorm 1116632, CDR-verified)
     ('oral_anticoag', [1310149,  # warfarin
                        43013024, # apixaban
-                       1592645,  # rivaroxaban (best-available ID — verify)
-                       1599538]),# dabigatran (best-available ID — verify)
+                       40241331, # rivaroxaban (RxNorm 1114195, CDR-verified)
+                       40228152]),# dabigatran etexilate (RxNorm 1037042, CDR-verified)
     ('metformin',     [1503297]),
 
     # ── SGLT2 inhibitors ─────────────────────────────────────────────────────

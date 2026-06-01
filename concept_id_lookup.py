@@ -206,3 +206,90 @@ if rx_not_found:
 print('\n\nLOOKUP COMPLETE')
 print('Section A: verify MACE concept names are as expected')
 print('Section C: update rivaroxaban/dabigatran/ticagrelor in build_master.py if IDs change')
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION D — Correct CVD death concept IDs + PCOS verification
+#
+# Several concept IDs in CELL 2's CVD death definition were wrong:
+#   4059796  → H/O chickenpox  (should be sudden cardiac death)
+#   40479586 → Lofepramine HCl (should be cardiogenic shock)
+#   4108812  → Septic myocarditis (wrong)
+#   312927   → Acute cor pulmonale (should be hypertensive heart disease)
+#   4108814  → Pericardial effusion (should be ischaemic heart disease)
+#
+# This section finds the correct OMOP concept IDs via SNOMED code lookup.
+# Also verifies PCOS (concept_id 40443308 in build_master.py).
+# ══════════════════════════════════════════════════════════════════════════════
+
+CVD_DEATH_SNOMED = {
+    # Missing from CELL 2 — need to add
+    'sudden_cardiac_death':     ('410429000', 'Sudden cardiac death'),
+    'cardiogenic_shock':        ('57782003',  'Cardiogenic shock'),
+    'hypertensive_heart_dis':   ('64715009',  'Hypertensive heart disease'),
+    'ventricular_fibrillation': ('71908006',  'Ventricular fibrillation'),
+    'intracerebral_hemorrhage': ('274100004', 'Intracerebral haemorrhage'),
+    # Verify existing (right concept, wrong label in our lookup)
+    'ischemic_heart_disease':   ('414545008', 'Ischaemic heart disease'),
+    # PCOS verification (build_master.py currently uses 40443308)
+    'pcos_snomed1':             ('237067000', 'Polycystic ovaries'),
+    'pcos_snomed2':             ('69878008',  'Polycystic ovary syndrome (Stein-Leventhal)'),
+}
+
+print(f'\n\n{"=" * 70}')
+print('SECTION D — Correct CVD death concept IDs + PCOS verification')
+print('=' * 70)
+
+cvd_codes = [code for code, _ in CVD_DEATH_SNOMED.values()]
+q_cvd = f"""
+SELECT concept_id, concept_name, concept_code AS snomed_code, domain_id, standard_concept
+FROM `{CDR}.concept`
+WHERE vocabulary_id = 'SNOMED'
+  AND concept_code IN ({','.join(f"'{c}'" for c in cvd_codes)})
+  AND standard_concept = 'S'
+ORDER BY concept_code
+"""
+cvd_df = client.query(q_cvd).to_dataframe()
+print('\nFound by SNOMED code:')
+print(cvd_df.to_string(index=False))
+
+print(f'\n{SEP}')
+cvd_code_to_row = {r['snomed_code']: r for _, r in cvd_df.iterrows()}
+for label, (code, expected) in CVD_DEATH_SNOMED.items():
+    row = cvd_code_to_row.get(code)
+    if row is not None:
+        print(f"  {label:<28} SNOMED {code:<12} → {int(row['concept_id']):>10,}  '{row['concept_name']}'")
+    else:
+        print(f"  {label:<28} SNOMED {code:<12} → *** NOT FOUND — trying name fallback ***")
+
+# Name-based fallback for any not found by SNOMED code
+cvd_not_found = [label for label, (code, _) in CVD_DEATH_SNOMED.items()
+                 if code not in cvd_code_to_row]
+if cvd_not_found:
+    print(f'\n{SEP}\nName-based fallback:\n{SEP}')
+    search_terms = [CVD_DEATH_SNOMED[l][1].lower() for l in cvd_not_found]
+    term_sql = ' OR '.join([f"LOWER(concept_name) LIKE '%{t[:25]}%'" for t in search_terms])
+    q_cvd_name = f"""
+    SELECT concept_id, concept_name, concept_code, vocabulary_id, domain_id, standard_concept
+    FROM `{CDR}.concept`
+    WHERE standard_concept = 'S'
+      AND domain_id = 'Condition'
+      AND ({term_sql})
+    ORDER BY concept_name
+    LIMIT 30
+    """
+    print(client.query(q_cvd_name).to_dataframe().to_string(index=False))
+
+# Also directly check what concept_id 40443308 is (current PCOS ID in build_master)
+print(f'\n{SEP}')
+print('Direct lookup of current PCOS concept_id in build_master.py (40443308):')
+q_pcos = f"""
+SELECT concept_id, concept_name, domain_id, vocabulary_id, concept_code, standard_concept
+FROM `{CDR}.concept`
+WHERE concept_id = 40443308
+"""
+print(client.query(q_pcos).to_dataframe().to_string(index=False))
+
+print(f'\n{SEP}')
+print('SECTION D COMPLETE')
+print('Use the correct concept IDs above to fix CELL 2 CVD death definition')
+print('PCOS: confirm concept_id 40443308 is correct before re-running build_master.py')
