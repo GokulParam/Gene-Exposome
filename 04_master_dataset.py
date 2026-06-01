@@ -115,35 +115,20 @@ print("\n" + "=" * 60)
 print("STEP 3: Get zip3 from CDR")
 print("=" * 60)
 
-# Pull ALL zip3 rows without a WHERE IN clause (avoids 1MB query limit).
-# We filter to our cohort in pandas after the fetch.
-zip3_query_cb = f"""
-SELECT CAST(person_id AS STRING) AS person_id,
-       zip3_as_string AS zip3
-FROM `{CDR}.cb_search_person`
-WHERE zip3_as_string IS NOT NULL
-"""
-
-zip3_query_ext = f"""
-SELECT CAST(pe.person_id AS STRING) AS person_id,
-       SUBSTR(pe.value_as_string, 1, 3) AS zip3
-FROM `{CDR}.person_ext` pe
-WHERE pe.src_id LIKE '%zip%'
-  AND pe.value_as_string IS NOT NULL
-"""
-
+# Diagnostic confirmed: zip codes live in observation with concept_id 3043579
+# ("Postal code [Location]") — 633k persons have it in this CDR.
+# cb_search_person has no zip column; person_ext has no zip column.
+# Full-table fetch, then filter to cohort in pandas (avoids 1MB query limit).
 zip3_query_obs = f"""
 SELECT CAST(o.person_id AS STRING) AS person_id,
        SUBSTR(o.value_as_string, 1, 3) AS zip3
 FROM `{CDR}.observation` o
-WHERE o.observation_concept_id = 1585250
+WHERE o.observation_concept_id = 3043579
   AND o.value_as_string IS NOT NULL
 """
 
 zip3_df = None
-for label, q in [('cb_search_person', zip3_query_cb),
-                  ('person_ext',       zip3_query_ext),
-                  ('observation',      zip3_query_obs)]:
+for label, q in [('observation_3043579', zip3_query_obs)]:
     try:
         tmp = client.query(q).to_dataframe()
         tmp['person_id'] = tmp['person_id'].astype(str)
