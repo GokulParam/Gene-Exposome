@@ -9,8 +9,40 @@ import pandas as pd
 import numpy as np
 
 WORKSPACE = '/home/dataproc/workspaces/geneexposome'
-master = pd.read_csv(f'{WORKSPACE}/master_dataset.csv', dtype={'person_id': str},
-                     low_memory=False)
+
+# Read only column names first (no data loaded)
+all_cols = pd.read_csv(f'{WORKSPACE}/master_dataset.csv', nrows=0).columns.tolist()
+
+# Core columns needed for Table 1
+CORE_COLS = [
+    'person_id',
+    'age_at_landmark', 'sex_at_birth', 'race', 'ethnicity',
+    'bmi', 'sbp', 'dbp', 'chol_total', 'ldl', 'hdl',
+    'hba1c', 'glucose', 'creatinine',
+    'htn', 't2dm', 'obesity_dx', 'cad_prev', 'ckd',
+    'statin', 'antihtn', 'metformin', 'antiplatelet', 'current_smoker',
+    'cad_prs', 'prs_ldlc', 'prs_obesity', 'prs_sbp', 'prs_t2d',
+    'mace3_event', 'has_mi', 'has_stroke', 'has_cvd_death', 'has_any_death',
+]
+
+# Add one probe column per exposome prefix to check linkage rate
+PREFIXES = ['gee', 'social', 'noise', 'smart', 'toxins', 'wildfire']
+probe_cols = {}
+for pfx in PREFIXES:
+    col = next((c for c in all_cols if c.startswith(f'{pfx}_')), None)
+    if col:
+        probe_cols[pfx] = col
+        CORE_COLS.append(col)
+
+# Load only what we need, downcast floats to save RAM
+use_cols = [c for c in CORE_COLS if c in all_cols]
+master = pd.read_csv(
+    f'{WORKSPACE}/master_dataset.csv',
+    usecols=use_cols,
+    dtype={'person_id': str},
+)
+for c in master.select_dtypes('float64').columns:
+    master[c] = master[c].astype('float32')
 
 N = len(master)
 
@@ -143,18 +175,17 @@ for col, label in [
 # ── Exposome coverage ─────────────────────────────────────────────────────────
 print(f"\n\n{'EXPOSOME LINKAGE':}")
 print(SEP)
-for prefix, label in [
-    ('gee',      'GEE (air quality / climate)'),
-    ('social',   'Social exposome'),
-    ('noise',    'Noise'),
-    ('smart',    'SMART (built environment)'),
-    ('toxins',   'Toxins'),
-    ('wildfire', 'Wildfire smoke'),
-]:
-    probe = next((c for c in master.columns if c.startswith(f'{prefix}_')), None)
-    if probe:
-        n_linked = master[probe].notna().sum()
-        print(f"  {label:<40} {n_linked:>7,}  ({100*n_linked/N:5.1f}%)")
+LABELS = {
+    'gee':      'GEE (air quality / climate)',
+    'social':   'Social exposome',
+    'noise':    'Noise',
+    'smart':    'SMART (built environment)',
+    'toxins':   'Toxins',
+    'wildfire': 'Wildfire smoke',
+}
+for pfx, probe in probe_cols.items():
+    n_linked = master[probe].notna().sum()
+    print(f"  {LABELS.get(pfx, pfx):<40} {n_linked:>7,}  ({100*n_linked/N:5.1f}%)")
 
 print(f"\n{SEP2}")
 print(f"  END OF TABLE 1")
