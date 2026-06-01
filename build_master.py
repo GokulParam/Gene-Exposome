@@ -436,14 +436,27 @@ print(f"  Current smoker:       {n_cur:,} ({100*n_cur/len(master):.1f}%)")
 del smoke, current_ids; gc.collect()
 
 
-# ── STEP 8: Z-score PRS ───────────────────────────────────────────────────────
-sep("STEP 8: Z-score PRS columns")
+# ── STEP 8: Rank-based inverse normal transform (RINT) for PRS ────────────────
+sep("STEP 8: RINT PRS columns")
+from scipy.stats import norm as _norm
+
+def rank_int(series):
+    """Rank-based inverse normal transformation.
+    Robust to skew and WGS/array scale differences; standard in PRS analyses."""
+    s = series.astype('float64')
+    non_null = s.notna()
+    ranks = s[non_null].rank(method='average') / (non_null.sum() + 1)
+    result = s.copy()
+    result[non_null] = ranks.map(_norm.ppf)
+    return result
+
 prs_cols = [c for c in master.columns if c.startswith('prs_') or c == 'cad_prs']
 for col in prs_cols:
-    s = master[col].dropna().astype('float64')
-    mu, sd = float(s.mean()), float(s.std())
-    master[col] = ((master[col].astype('float64') - mu) / sd).round(5).astype('float32')
-    print(f"  {col:<20} raw mean={mu:>10.3f}  sd={sd:>8.3f}  → z-scored")
+    master[col] = rank_int(master[col]).round(5).astype('float32')
+    med = master[col].median()
+    q1  = master[col].quantile(0.25)
+    q3  = master[col].quantile(0.75)
+    print(f"  {col:<20} median={med:+.3f}  IQR=[{q1:.3f}, {q3:.3f}]")
 
 
 # ── STEP 9: Save ──────────────────────────────────────────────────────────────
