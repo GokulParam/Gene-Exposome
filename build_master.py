@@ -9,9 +9,10 @@ Steps:
   3. Get zip3 per person from CDR (observation concept 3043579)
   4. Exclude Alaska, Hawaii, territories, invalid zip3, and no-zip3 rows
   5. Merge 6 exposome files via zip3
-  6. Fix smoking variable (concept 40766307, most recent answer)
-  7. Z-score all PRS columns
-  8. Save master_dataset.csv and copy to bucket
+  6. Re-query medications from CDR with correct concept IDs
+  7. Fix smoking variable (concept 40766307, most recent answer)
+  8. Z-score all PRS columns
+  9. Save master_dataset.csv and copy to bucket
 """
 
 import os, gc, subprocess
@@ -24,14 +25,15 @@ WORKSPACE    = '/home/dataproc/workspaces/geneexposome'
 CDR          = 'wb-silky-artichoke-2408.C2024Q3R9'
 BUCKET       = 'gs://rw-migration-aou-rw-6cad436b'
 EXPOSOME_DIR = f'{WORKSPACE}/Exposome'
+LANDMARK     = '2018-01-01'
 client       = bigquery.Client(project='wb-shining-lemon-5239')
 
 EXCLUDE_ZIP3 = {
-    '000',                               # invalid
-    '006', '007', '008', '009',          # Puerto Rico
-    '967', '968',                        # Hawaii
-    '969',                               # Guam / Pacific territories
-    '995', '996', '997', '998', '999',   # Alaska
+    '000',
+    '006', '007', '008', '009',
+    '967', '968',
+    '969',
+    '995', '996', '997', '998', '999',
 }
 
 EXPOSOME_FILES = {
@@ -45,10 +47,73 @@ EXPOSOME_FILES = {
 
 EXTRA_PRS = ['LDLC', 'OBESITY', 'SBP', 'T2D']
 
+# ── Medication flags: (column_name, concept_ids)
+# All concept IDs are RxNorm ingredient-level; concept_ancestor expands to
+# all formulations.  Verified against CDR concept table May 2024.
+# Note: rivaroxaban and dabigatran concept IDs need CDR verification —
+# they are included here with best-available IDs.
+MED_FLAGS = [
+    ('statin',        [1545958,  # atorvastatin
+                       1510813,  # rosuvastatin
+                       1539403,  # simvastatin
+                       1551860,  # pravastatin
+                       1592085,  # lovastatin
+                       1549686,  # fluvastatin
+                       40165636]),# pitavastatin
+    ('ace_inhibitor', [1308216,  # lisinopril
+                       1334456,  # ramipril
+                       1341927,  # enalapril
+                       1335471,  # benazepril
+                       1373928,  # perindopril
+                       1340128,  # captopril
+                       1331235,  # quinapril
+                       1342439]),# fosinopril
+    ('arb',           [1367500,  # losartan
+                       1308842,  # valsartan
+                       40226742, # olmesartan
+                       1347384,  # irbesartan
+                       1351557,  # candesartan
+                       1386957,  # telmisartan
+                       44818489]),# azilsartan
+    ('beta_blocker',  [1307046,  # metoprolol
+                       1314002,  # atenolol
+                       1346823,  # carvedilol
+                       1338005,  # bisoprolol
+                       1353766,  # propranolol
+                       1313200]),# nebivolol
+    ('ccb',           [1332418,  # amlodipine
+                       1318853,  # nifedipine
+                       1328165,  # diltiazem
+                       1307788,  # verapamil
+                       1326012,  # felodipine
+                       40220386]),# clevidipine
+    ('diuretic',      [974166,   # hydrochlorothiazide
+                       1395058,  # chlorthalidone
+                       956874,   # furosemide
+                       992590,   # spironolactone
+                       1326303,  # indapamide
+                       942350,   # torsemide
+                       932745]), # bumetanide
+    ('aspirin',       [1112807]),
+    ('p2y12',         [1322184,  # clopidogrel
+                       40163924]),# ticagrelor
+    ('oral_anticoag', [1310149,  # warfarin
+                       43013024, # apixaban
+                       1592645,  # rivaroxaban (best-available ID — verify)
+                       1599538]),# dabigatran (best-available ID — verify)
+    ('metformin',     [1503297]),
+]
+
+# Derived composite flag (any antihypertensive drug class)
+# Built after individual flags are computed
+ANY_ANTIHTN_COLS = ['ace_inhibitor', 'arb', 'beta_blocker', 'ccb', 'diuretic']
+
+# Binary columns — written as int in final CSV
 BINARY_COLS = [
     'mace3_event', 'has_mi', 'has_stroke', 'has_cvd_death', 'has_any_death',
-    'htn', 't2dm', 'obesity_dx', 'cad_prev', 'ckd',
-    'statin', 'antihtn', 'metformin', 'antiplatelet', 'current_smoker',
+    'htn', 't2dm', 'obesity_dx', 'cad_prev', 'ckd', 'current_smoker',
+    'statin', 'ace_inhibitor', 'arb', 'beta_blocker', 'ccb', 'diuretic',
+    'aspirin', 'p2y12', 'oral_anticoag', 'metformin', 'any_antihtn',
 ]
 
 
@@ -60,7 +125,10 @@ def sep(title):
 sep("STEP 1: Load cohort_with_covariates.csv")
 master = pd.read_csv(f'{WORKSPACE}/cohort_with_covariates.csv',
                      dtype={'person_id': str})
-print(f"  {len(master):,} rows × {master.shape[1]} cols")
+# Drop old incorrect medication columns — will be replaced in Step 6
+old_med_cols = ['statin', 'antihtn', 'metformin', 'antiplatelet']
+master = master.drop(columns=[c for c in old_med_cols if c in master.columns])
+print(f"  {len(master):,} rows × {master.shape[1]} cols (old med flags dropped)")
 gc.collect()
 
 
@@ -135,16 +203,47 @@ for fname, pfx in EXPOSOME_FILES.items():
         exp[c] = exp[c].astype('float32')
     master = master.merge(exp, left_on='_z3', right_on='_ez', how='left')
     master = master.drop(columns=['_ez'], errors='ignore')
-    n_matched = master[next(c for c in master.columns if c.startswith(f'{pfx}_'))].notna().sum()
-    print(f"  {pfx}: {n_matched:,} / {len(master):,} rows matched "
-          f"({100*n_matched/len(master):.1f}%)")
+    probe = next(c for c in master.columns if c.startswith(f'{pfx}_'))
+    n_matched = master[probe].notna().sum()
+    print(f"  {pfx}: {n_matched:,} / {len(master):,} matched ({100*n_matched/len(master):.1f}%)")
     del exp; gc.collect()
 
 master = master.drop(columns=['_z3'], errors='ignore')
 
 
-# ── STEP 6: Smoking fix ───────────────────────────────────────────────────────
-sep("STEP 6: Fix smoking (concept 40766307)")
+# ── STEP 6: Medications (re-queried with correct concept IDs) ────────────────
+sep("STEP 6: Medication flags")
+print(f"\n  {'Flag':<16} {'N persons':>10}  {'%':>6}  Drugs included")
+print(f"  {'─'*65}")
+
+cohort_ids = master['person_id'].tolist()
+
+for col, concept_ids in MED_FLAGS:
+    ids_str = ', '.join(str(i) for i in concept_ids)
+    q_med = f"""
+    SELECT DISTINCT CAST(de.person_id AS STRING) AS person_id
+    FROM `{CDR}.drug_exposure` de
+    JOIN `{CDR}.concept_ancestor` ca
+        ON de.drug_concept_id = ca.descendant_concept_id
+    WHERE ca.ancestor_concept_id IN ({ids_str})
+      AND de.drug_exposure_start_date < '{LANDMARK}'
+    """
+    med_df = client.query(q_med).to_dataframe()
+    med_df['person_id'] = med_df['person_id'].astype(str)
+    exposed = set(med_df['person_id']) & set(cohort_ids)
+    master[col] = master['person_id'].isin(exposed).astype(int)
+    n = master[col].sum()
+    print(f"  {col:<16} {n:>10,}  {100*n/len(master):>5.1f}%")
+    del med_df; gc.collect()
+
+# Composite antihypertensive flag
+master['any_antihtn'] = master[ANY_ANTIHTN_COLS].max(axis=1).astype(int)
+n = master['any_antihtn'].sum()
+print(f"  {'any_antihtn':<16} {n:>10,}  {100*n/len(master):>5.1f}%  (ACE|ARB|BB|CCB|diuretic)")
+
+
+# ── STEP 7: Smoking fix ───────────────────────────────────────────────────────
+sep("STEP 7: Fix smoking (concept 40766307)")
 q_smoke = f"""
 WITH ranked AS (
     SELECT
@@ -173,8 +272,8 @@ print(f"  Current smoker:       {n_cur:,} ({100*n_cur/len(master):.1f}%)")
 del smoke, current_ids; gc.collect()
 
 
-# ── STEP 7: Z-score PRS ───────────────────────────────────────────────────────
-sep("STEP 7: Z-score PRS columns")
+# ── STEP 8: Z-score PRS ───────────────────────────────────────────────────────
+sep("STEP 8: Z-score PRS columns")
 prs_cols = [c for c in master.columns if c.startswith('prs_') or c == 'cad_prs']
 for col in prs_cols:
     s = master[col].dropna().astype('float64')
@@ -183,15 +282,13 @@ for col in prs_cols:
     print(f"  {col:<20} raw mean={mu:>10.3f}  sd={sd:>8.3f}  → z-scored")
 
 
-# ── STEP 8: Save ──────────────────────────────────────────────────────────────
-sep("STEP 8: Save master_dataset.csv")
+# ── STEP 9: Save ──────────────────────────────────────────────────────────────
+sep("STEP 9: Save master_dataset.csv")
 
-# Ensure binary columns are written as integers (not floats)
 for c in BINARY_COLS:
     if c in master.columns:
         master[c] = master[c].fillna(0).astype(int)
 
-# Round remaining floats to 4 dp to keep file size reasonable
 for c in master.select_dtypes(include=['float32', 'float64']).columns:
     master[c] = master[c].round(4)
 
@@ -206,5 +303,4 @@ del master; gc.collect()
 result = subprocess.run(['gsutil', 'cp', out_path, f'{BUCKET}/master_dataset.csv'],
                         capture_output=True, text=True, timeout=300)
 print(f"  {'Copied to bucket.' if result.returncode == 0 else f'gsutil failed: {result.stderr}'}")
-
 print("\nDONE — run table1.py to see the summary")

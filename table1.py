@@ -33,7 +33,9 @@ CORE = [
     'bmi', 'sbp', 'dbp', 'chol_total', 'ldl', 'hdl',
     'hba1c', 'glucose', 'creatinine',
     'htn', 't2dm', 'obesity_dx', 'cad_prev', 'ckd',
-    'statin', 'antihtn', 'metformin', 'antiplatelet', 'current_smoker',
+    'statin', 'ace_inhibitor', 'arb', 'beta_blocker', 'ccb', 'diuretic',
+    'any_antihtn', 'aspirin', 'p2y12', 'oral_anticoag', 'metformin',
+    'current_smoker',
     'cad_prs', 'prs_ldlc', 'prs_obesity', 'prs_sbp', 'prs_t2d',
     'mace3_event', 'has_mi', 'has_stroke', 'has_cvd_death', 'has_any_death',
     'zip3',
@@ -144,11 +146,34 @@ for col, label in [
         print(f"  {label:<42} {pct(col)}")
 
 print(f"\n\nMEDICATIONS (any use before 2018-01-01)\n{S}")
+print(f"  {'Lipid-lowering'}")
 for col, label in [
-    ('statin',      'Statin'),
-    ('antihtn',     'Antihypertensive'),
-    ('metformin',   'Metformin'),
-    ('antiplatelet','Antiplatelet'),
+    ('statin',        '  Statin (any)'),
+]:
+    if col in master.columns:
+        print(f"  {label:<42} {pct(col)}")
+print(f"  {'Antihypertensive'}")
+for col, label in [
+    ('any_antihtn',   '  Any antihypertensive'),
+    ('ace_inhibitor', '    ACE inhibitor'),
+    ('arb',           '    ARB'),
+    ('beta_blocker',  '    Beta-blocker'),
+    ('ccb',           '    Calcium channel blocker'),
+    ('diuretic',      '    Diuretic'),
+]:
+    if col in master.columns:
+        print(f"  {label:<42} {pct(col)}")
+print(f"  {'Antiplatelet / anticoagulant'}")
+for col, label in [
+    ('aspirin',       '  Aspirin'),
+    ('p2y12',         '  P2Y12 inhibitor (clopidogrel/ticagrelor)'),
+    ('oral_anticoag', '  Oral anticoagulant'),
+]:
+    if col in master.columns:
+        print(f"  {label:<42} {pct(col)}")
+print(f"  {'Diabetes'}")
+for col, label in [
+    ('metformin',     '  Metformin'),
 ]:
     if col in master.columns:
         print(f"  {label:<42} {pct(col)}")
