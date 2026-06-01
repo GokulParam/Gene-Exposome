@@ -156,6 +156,31 @@ else:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# STEP 3b — Exclude Alaska, Hawaii, territories, and invalid zip3s
+# ═════════════════════════════════════════════════════════════════════════════
+print("\n" + "=" * 60)
+print("STEP 3b: Exclude AK / HI / territories / invalid zip3")
+print("=" * 60)
+
+EXCLUDE_ZIP3 = {
+    '000',                          # invalid/unknown
+    '006', '007', '008', '009',     # Puerto Rico
+    '967', '968',                   # Hawaii
+    '969',                          # Guam / Pacific territories
+    '995', '996', '997', '998', '999',  # Alaska
+}
+
+zip3_key = (master['zip3'].astype(str).str.strip()
+            .str.extract(r'(\d+)', expand=False).str.zfill(3))
+excluded_mask = zip3_key.isin(EXCLUDE_ZIP3)
+n_before = len(master)
+master = master[~excluded_mask].copy()
+gc.collect()
+print(f"  Excluded: {n_before - len(master):,}  (AK/HI/territories/invalid)")
+print(f"  Final cohort: {len(master):,}")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # STEP 4 — Merge exposome files (one at a time)
 # ═════════════════════════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
