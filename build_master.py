@@ -287,7 +287,6 @@ for col, concept_ids in MED_FLAGS:
     JOIN `{CDR}.concept_ancestor` ca
         ON de.drug_concept_id = ca.descendant_concept_id
     WHERE ca.ancestor_concept_id IN ({ids_str})
-      AND de.drug_exposure_start_date < '{LANDMARK}'
     """
     med_df = client.query(q_med).to_dataframe()
     med_df['person_id'] = med_df['person_id'].astype(str)
@@ -320,7 +319,6 @@ for col, concept_ids in COND_FLAGS:
     JOIN `{CDR}.concept_ancestor` ca
         ON co.condition_concept_id = ca.descendant_concept_id
     WHERE ca.ancestor_concept_id IN ({ids_str})
-      AND co.condition_start_date < '{LANDMARK}'
     """
     cond_df = client.query(q_cond).to_dataframe()
     cond_df['person_id'] = cond_df['person_id'].astype(str)
@@ -342,7 +340,6 @@ for col, concept_ids in CHEMO_FLAGS:
     JOIN `{CDR}.concept_ancestor` ca
         ON de.drug_concept_id = ca.descendant_concept_id
     WHERE ca.ancestor_concept_id IN ({ids_str})
-      AND de.drug_exposure_start_date < '{LANDMARK}'
     """
     chemo_df = client.query(q_chemo).to_dataframe()
     chemo_df['person_id'] = chemo_df['person_id'].astype(str)
