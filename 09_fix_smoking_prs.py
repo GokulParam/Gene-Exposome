@@ -47,7 +47,6 @@ WITH ranked AS (
     FROM `{CDR}.observation` o
     LEFT JOIN `{CDR}.concept` c_val ON o.value_as_concept_id = c_val.concept_id
     WHERE o.observation_concept_id = 40766307
-      AND o.observation_date < '{LANDMARK}'
       AND o.value_as_concept_id IS NOT NULL
 )
 SELECT person_id, answer
@@ -55,7 +54,7 @@ FROM ranked WHERE rn = 1
 """
 smoke_df = client.query(q_smoke).to_dataframe()
 smoke_df['person_id'] = smoke_df['person_id'].astype(str)
-print(f"\nPeople with answer before landmark: {len(smoke_df):,}")
+print(f"\nPeople with any smoking answer: {len(smoke_df):,}")
 print("\nAnswer breakdown:")
 print(smoke_df['answer'].value_counts().to_string())
 
@@ -102,28 +101,36 @@ print("\n" + "=" * 60)
 print("STEP 3: Patch master_dataset.csv in chunks")
 print("=" * 60)
 
+# Read original dtypes from first chunk to restore them after patching
+dtype_sample = pd.read_csv(IN_PATH, nrows=100, dtype={'person_id': str},
+                           low_memory=False)
+int_cols  = dtype_sample.select_dtypes('int64').columns.tolist()
+bool_cols = dtype_sample.select_dtypes('bool').columns.tolist()
+del dtype_sample
+
 reader    = pd.read_csv(IN_PATH, dtype={'person_id': str}, chunksize=CHUNKSIZE,
                         low_memory=False)
 first     = True
 rows_done = 0
 
 for chunk in reader:
-    # Downcast floats to save memory within chunk
-    for c in chunk.select_dtypes('float64').columns:
-        chunk[c] = chunk[c].astype('float32')
-
     # Patch current_smoker
-    new_val = chunk['person_id'].map(smoking_map)   # NaN where no survey answer
-    chunk['current_smoker'] = new_val.fillna(0).astype('int8')
+    new_val = chunk['person_id'].map(smoking_map)
+    chunk['current_smoker'] = new_val.fillna(0).astype('int64')
 
-    # Z-score PRS
+    # Z-score PRS (keep as float, 6 sig figs is plenty)
     for col in prs_cols:
         mu, sd = prs_params[col]
-        chunk[col] = ((chunk[col].astype('float64') - mu) / sd).astype('float32')
+        chunk[col] = (chunk[col].astype('float64') - mu) / sd
 
-    # Write
+    # Restore integer types so they write as 0/1 not 0.0/1.0
+    for c in int_cols:
+        if c in chunk.columns and c != 'current_smoker':
+            chunk[c] = chunk[c].astype('Int64')  # nullable int handles NaN
+
+    # Write with limited float precision to keep file size reasonable
     chunk.to_csv(OUT_PATH, mode='w' if first else 'a',
-                 header=first, index=False)
+                 header=first, index=False, float_format='%.6g')
     first      = False
     rows_done += len(chunk)
     print(f"  {rows_done:,} rows written ...", end='\r')
