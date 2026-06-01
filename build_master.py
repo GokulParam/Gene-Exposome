@@ -103,11 +103,24 @@ MED_FLAGS = [
                        1592645,  # rivaroxaban (best-available ID — verify)
                        1599538]),# dabigatran (best-available ID — verify)
     ('metformin',     [1503297]),
+
+    # ── Diabetes medications (beyond metformin) ──────────────────────────────
+    # Concept IDs pending concept_id_lookup.py — [0] = skipped at runtime
+    ('sglt2i',        [0]),   # empagliflozin, canagliflozin, dapagliflozin, ertugliflozin
+    ('glp1ra',        [0]),   # semaglutide, liraglutide, dulaglutide, exenatide, tirzepatide
+    ('dpp4i',         [0]),   # sitagliptin, saxagliptin, alogliptin, linagliptin
+    ('sulfonylurea',  [0]),   # glipizide, glyburide, glimepiride
+    ('tzd',           [0]),   # pioglitazone, rosiglitazone
+    ('insulin_any',   [0]),   # glargine, lispro, aspart, detemir, degludec, NPH, regular
+
+    # ── ARNI ────────────────────────────────────────────────────────────────
+    ('arni',          [0]),   # sacubitril (valsartan already in arb flag)
 ]
 
-# Derived composite flag (any antihypertensive drug class)
-# Built after individual flags are computed
+# Derived composite flags
 ANY_ANTIHTN_COLS = ['ace_inhibitor', 'arb', 'beta_blocker', 'ccb', 'diuretic']
+ANY_DM_MED_COLS  = ['metformin', 'sglt2i', 'glp1ra', 'dpp4i',
+                    'sulfonylurea', 'tzd', 'insulin_any']
 
 # ── Additional comorbidity flags ──────────────────────────────────────────────
 # Concept IDs are OMOP standard (SNOMED-based) ancestor concepts; concept_ancestor
@@ -164,7 +177,9 @@ BINARY_COLS = [
     'htn', 't2dm', 'obesity_dx', 'cad_prev', 'ckd', 'current_smoker',
     # medications
     'statin', 'ace_inhibitor', 'arb', 'beta_blocker', 'ccb', 'diuretic',
-    'aspirin', 'p2y12', 'oral_anticoag', 'metformin', 'any_antihtn',
+    'aspirin', 'p2y12', 'oral_anticoag', 'arni',
+    'metformin', 'sglt2i', 'glp1ra', 'dpp4i', 'sulfonylurea', 'tzd', 'insulin_any',
+    'any_antihtn', 'any_dm_med',
     # additional comorbidities
     't1dm', 'fh', 'pad',
     'metabolic_syndrome', 'osa', 'heart_failure', 'afib',
@@ -293,10 +308,15 @@ for col, concept_ids in MED_FLAGS:
     print(f"  {col:<16} {n:>10,}  {100*n/len(master):>5.1f}%")
     del med_df; gc.collect()
 
-# Composite antihypertensive flag
+# Composite flags
 master['any_antihtn'] = master[ANY_ANTIHTN_COLS].max(axis=1).astype(int)
 n = master['any_antihtn'].sum()
 print(f"  {'any_antihtn':<16} {n:>10,}  {100*n/len(master):>5.1f}%  (ACE|ARB|BB|CCB|diuretic)")
+
+dm_cols_present = [c for c in ANY_DM_MED_COLS if c in master.columns]
+master['any_dm_med'] = master[dm_cols_present].max(axis=1).astype(int)
+n = master['any_dm_med'].sum()
+print(f"  {'any_dm_med':<16} {n:>10,}  {100*n/len(master):>5.1f}%  (metformin|SGLT2i|GLP1RA|DPP4i|SU|TZD|insulin)")
 
 
 # ── STEP 6b: Additional comorbidities ────────────────────────────────────────

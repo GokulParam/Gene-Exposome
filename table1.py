@@ -48,7 +48,9 @@ CORE = [
     'preeclampsia', 'gest_dm', 'preterm', 'preg_loss',
     # medications
     'statin', 'ace_inhibitor', 'arb', 'beta_blocker', 'ccb', 'diuretic',
-    'any_antihtn', 'aspirin', 'p2y12', 'oral_anticoag', 'metformin',
+    'any_antihtn', 'aspirin', 'p2y12', 'oral_anticoag', 'arni',
+    'metformin', 'sglt2i', 'glp1ra', 'dpp4i', 'sulfonylurea', 'tzd', 'insulin_any',
+    'any_dm_med',
     'current_smoker',
     'cad_prs', 'prs_ldlc', 'prs_obesity', 'prs_sbp', 'prs_t2d',
     'mace3_event', 'has_mi', 'has_stroke', 'has_cvd_death', 'has_any_death',
@@ -242,10 +244,24 @@ for col, label in [
         print(f"  {label:<42} {pct(col)}")
 print(f"  {'Diabetes'}")
 for col, label in [
-    ('metformin',     '  Metformin'),
+    ('any_dm_med',    '  Any diabetes medication'),
+    ('metformin',     '    Metformin'),
+    ('sglt2i',        '    SGLT2 inhibitor'),
+    ('glp1ra',        '    GLP-1 receptor agonist'),
+    ('dpp4i',         '    DPP4 inhibitor'),
+    ('sulfonylurea',  '    Sulfonylurea'),
+    ('tzd',           '    Thiazolidinedione'),
+    ('insulin_any',   '    Insulin (any)'),
 ]:
     if col in master.columns:
-        print(f"  {label:<42} {pct(col)}")
+        print(f"  {label:<48} {pct(col)}")
+
+print(f"  {'Cardiac — ARNI'}")
+for col, label in [
+    ('arni',  '  Sacubitril/valsartan (ARNI)'),
+]:
+    if col in master.columns:
+        print(f"  {label:<48} {pct(col)}")
 
 print(f"\n\nSMOKING\n{S}")
 if 'current_smoker' in master.columns:
