@@ -182,7 +182,15 @@ COND_FLAGS = [
     # Pregnancy-related (coded 0 for males)
     ('preeclampsia',     [439393, 443700]),    # Pre-eclampsia (SNOMED 398254007) + eclampsia (15938005)
     ('gest_dm',          [4024659]),           # Gestational diabetes mellitus
-    ('preterm',          [4086393]),           # Premature delivery (SNOMED 282020008)
+    ('preterm',          [4086393,   # Premature delivery
+                          4175637,   # Premature pregnancy delivered
+                          4273560,   # Premature labor
+                          36712702,  # Preterm labor with preterm delivery
+                          44784550,  # Preterm spontaneous labor with preterm delivery
+                          37110284,  # Preterm delivery following Cesarean section
+                          37110283,  # Preterm delivery following induction of labor
+                          45757175,  # Preterm labor in 2nd trimester, preterm delivery
+                          45757176]),# Preterm labor in 3rd trimester, preterm delivery
     ('preg_loss',        [4067106]),           # Miscarriage / pregnancy loss
 ]
 
