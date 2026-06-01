@@ -7,8 +7,19 @@ Run this as a standalone cell after 04_master_dataset.py has completed.
 
 import pandas as pd
 import numpy as np
+import os
 
 WORKSPACE = '/home/dataproc/workspaces/geneexposome'
+
+# ── Exclusion cascade (read only person_id — tiny memory footprint) ──────────
+def nrows(path):
+    if not os.path.exists(path):
+        return None
+    return len(pd.read_csv(path, usecols=['person_id']))
+
+n_full      = nrows(f'{WORKSPACE}/cohort_skeleton_full.csv')
+n_incident  = nrows(f'{WORKSPACE}/cohort_skeleton_incident.csv')
+n_covariates= nrows(f'{WORKSPACE}/cohort_with_covariates.csv')
 
 # Read only column names first (no data loaded)
 all_cols = pd.read_csv(f'{WORKSPACE}/master_dataset.csv', nrows=0).columns.tolist()
@@ -45,6 +56,32 @@ for c in master.select_dtypes('float64').columns:
     master[c] = master[c].astype('float32')
 
 N = len(master)
+
+# ── Print exclusion cascade ───────────────────────────────────────────────────
+SEP  = "─" * 70
+SEP2 = "═" * 70
+
+print(SEP2)
+print("  COHORT EXCLUSION FLOW")
+print(SEP2)
+if n_full is not None:
+    print(f"  All of Us participants with CAD PRS          {n_full:>7,}")
+if n_full and n_incident:
+    lost_prev = n_full - n_incident
+    print(f"  − Prevalent MACE before 2018-01-01           {lost_prev:>7,}  (excluded: MACE before landmark)")
+if n_incident is not None:
+    print(f"  = Incident cohort (landmark 2018-01-01)      {n_incident:>7,}")
+if n_incident and n_covariates and n_covariates != n_incident:
+    lost_cov = n_incident - n_covariates
+    print(f"  − Other exclusions (age <18 etc.)            {lost_cov:>7,}")
+if n_covariates is not None:
+    print(f"  = After covariate extraction                 {n_covariates:>7,}")
+if n_covariates:
+    lost_geo = n_covariates - N
+    print(f"  − Alaska / Hawaii / territories / invalid    {lost_geo:>7,}  (no exposome coverage)")
+print(f"  = FINAL ANALYSIS COHORT                      {N:>7,}")
+print(SEP2)
+print()
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 def med_iqr(col):
