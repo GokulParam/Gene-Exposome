@@ -114,47 +114,48 @@ ANY_ANTIHTN_COLS = ['ace_inhibitor', 'arb', 'beta_blocker', 'ccb', 'diuretic']
 # expands to all descendant codes.  Run comorbidities_diagnostic.py first to
 # verify IDs against this CDR version before trusting counts.
 COND_FLAGS = [
-    # Very High Risk (additions — htn/t2dm/cad_prev/ckd already in base cohort)
-    ('t1dm',             [201254]),            # Type 1 diabetes mellitus
-    ('fh',               [314522]),            # Familial hypercholesterolaemia
-    ('pad',              [321052]),            # Peripheral vascular disease / PAD
+    # ── Verified against CDR concept table ──────────────────────────────────
+    # Very High Risk
+    ('t1dm',             [201254]),   # Type 1 diabetes mellitus
+    ('pad',              [321052]),   # Peripheral vascular disease
 
     # High Risk
-    ('metabolic_syndrome', [4028741]),         # Metabolic syndrome
-    ('osa',              [4173505]),           # Obstructive sleep apnea
-    ('heart_failure',    [316139]),            # Heart failure
-    ('afib',             [313217]),            # Atrial fibrillation
+    ('heart_failure',    [316139]),   # Heart failure
+    ('afib',             [313217]),   # Atrial fibrillation
 
     # Inflammatory / Autoimmune
-    ('ra',               [80809]),             # Rheumatoid arthritis
-    ('sle',              [201606]),            # Systemic lupus erythematosus (TBV)
-    ('psoriasis',        [140168]),            # Psoriasis
-    ('crohns',           [4052776]),           # Crohn's disease (TBV)
-    ('ulc_colitis',      [4059478]),           # Ulcerative colitis (TBV)
-    ('hiv',              [439727]),            # HIV
+    ('ra',               [80809]),    # Rheumatoid arthritis
+    ('psoriasis',        [140168]),   # Psoriasis
+    ('crohns',           [201606]),   # Crohn's disease  ← was sle, confirmed correct
+    ('hiv',              [439727]),   # Human immunodeficiency virus infection
 
-    # Endocrine / Hormonal
-    ('hypothyroidism',   [140673]),            # Hypothyroidism
-    ('hyperthyroidism',  [4058243]),           # Hyperthyroidism (TBV)
-    ('pcos',             [4070454]),           # Polycystic ovary syndrome (TBV)
-    ('cushings',         [197961]),            # Cushing's syndrome (TBV)
-    ('acromegaly',       [4023722]),           # Acromegaly (TBV)
+    # Endocrine
+    ('hypothyroidism',   [140673]),   # Hypothyroidism
 
-    # Pregnancy-related (coded 0 for males)
-    ('preeclampsia',     [4060985, 4024244]),  # Pre-eclampsia + eclampsia (TBV)
-    ('gest_dm',          [4024659]),           # Gestational diabetes (TBV)
-    ('preterm',          [4163838]),           # Preterm delivery (TBV)
-    ('preg_loss',        [4067106]),           # Spontaneous abortion / pregnancy loss (TBV)
+    # Pregnancy-related
+    ('gest_dm',          [4024659]),  # Gestational diabetes mellitus
+    ('preg_loss',        [4067106]),  # Miscarriage / pregnancy loss
+
+    # ── Pending: run concept_id_lookup.py and replace 0s with real IDs ──────
+    # (flagged ✗ MISMATCH in comorbidities_diagnostic.py)
+    ('fh',               [0]),        # Familial hypercholesterolaemia — SNOMED 398036000
+    ('metabolic_syndrome',[0]),       # Metabolic syndrome — SNOMED 237602007
+    ('osa',              [0]),        # Obstructive sleep apnea — SNOMED 78275009
+    ('sle',              [0]),        # Systemic lupus erythematosus — SNOMED 55464009
+    ('ulc_colitis',      [0]),        # Ulcerative colitis — SNOMED 64766004
+    ('hyperthyroidism',  [0]),        # Hyperthyroidism — SNOMED 34486009
+    ('pcos',             [0]),        # Polycystic ovary syndrome — SNOMED 69878008
+    ('cushings',         [0]),        # Cushing's syndrome — SNOMED 47270006
+    ('acromegaly',       [0]),        # Acromegaly — SNOMED 74107003
+    ('preeclampsia',     [0]),        # Pre-eclampsia + eclampsia — SNOMED 398254007 / 15938005
+    ('preterm',          [0]),        # Preterm delivery — SNOMED 282020008
 ]
 
-# Cardiotoxic chemotherapy — queried from drug_exposure (no condition code)
-# Anthracyclines + trastuzumab; concept_ancestor captures all formulations
 CHEMO_FLAGS = [
-    ('cardiotoxic_chemo', [1350066,  # doxorubicin
-                           1396797,  # epirubicin
-                           1313411,  # daunorubicin
-                           1336941,  # idarubicin
-                           1336825]),# trastuzumab
+    # Cardiotoxic chemotherapy — pending concept_id_lookup.py output
+    # RxNorm CUIs: doxorubicin=3151, epirubicin=41867, daunorubicin=3002,
+    #              idarubicin=27340, trastuzumab=224905
+    ('cardiotoxic_chemo', [0]),       # Replace 0 with correct concept IDs after lookup
 ]
 
 # IBD composite (Crohn's OR UC) — derived after COND_FLAGS built
@@ -308,6 +309,10 @@ print(f"\n  {'Flag':<22} {'N persons':>10}  {'%':>6}")
 print(f"  {'─'*45}")
 
 for col, concept_ids in COND_FLAGS:
+    if concept_ids == [0]:
+        master[col] = 0  # pending concept ID — run concept_id_lookup.py
+        print(f"  {col:<22} {'PENDING':>10}  (concept ID not yet verified)")
+        continue
     ids_str = ', '.join(str(i) for i in concept_ids)
     q_cond = f"""
     SELECT DISTINCT CAST(co.person_id AS STRING) AS person_id
@@ -326,6 +331,10 @@ for col, concept_ids in COND_FLAGS:
     del cond_df; gc.collect()
 
 for col, concept_ids in CHEMO_FLAGS:
+    if concept_ids == [0]:
+        master[col] = 0  # pending concept ID — run concept_id_lookup.py
+        print(f"  {col:<22} {'PENDING':>10}  [drug_exposure — concept ID not yet verified]")
+        continue
     ids_str = ', '.join(str(i) for i in concept_ids)
     q_chemo = f"""
     SELECT DISTINCT CAST(de.person_id AS STRING) AS person_id
