@@ -4,15 +4,16 @@ build_master.py
 Builds master_dataset.csv from scratch.
 
 Steps:
-  1. Load cohort_with_covariates.csv (clinical cohort + CAD PRS)
-  2. Merge extra PRS scores (LDLC, OBESITY, SBP, T2D)
-  3. Get zip3 per person from CDR (observation concept 3043579)
-  4. Exclude Alaska, Hawaii, territories, invalid zip3, and no-zip3 rows
-  5. Merge 6 exposome files via zip3
-  6. Re-query medications from CDR with correct concept IDs
-  7. Fix smoking variable (concept 40766307, most recent answer)
-  8. Z-score all PRS columns
-  9. Save master_dataset.csv and copy to bucket
+  1.  Load cohort_with_covariates.csv (clinical cohort + CAD PRS)
+  2.  Merge extra PRS scores (LDLC, OBESITY, SBP, T2D)
+  3.  Get zip3 per person from CDR (observation concept 3043579)
+  4.  Exclude Alaska, Hawaii, territories, invalid zip3, and no-zip3 rows
+  5.  Merge 6 exposome files via zip3
+  6.  Re-query medications from CDR with correct concept IDs
+  6b. Additional comorbidities (conditions + cardiotoxic chemo)
+  7.  Fix smoking variable (concept 40766307, most recent answer)
+  8.  Z-score all PRS columns
+  9.  Save master_dataset.csv and copy to bucket
 """
 
 import os, gc, subprocess
@@ -108,12 +109,71 @@ MED_FLAGS = [
 # Built after individual flags are computed
 ANY_ANTIHTN_COLS = ['ace_inhibitor', 'arb', 'beta_blocker', 'ccb', 'diuretic']
 
+# ── Additional comorbidity flags ──────────────────────────────────────────────
+# Concept IDs are OMOP standard (SNOMED-based) ancestor concepts; concept_ancestor
+# expands to all descendant codes.  Run comorbidities_diagnostic.py first to
+# verify IDs against this CDR version before trusting counts.
+COND_FLAGS = [
+    # Very High Risk (additions — htn/t2dm/cad_prev/ckd already in base cohort)
+    ('t1dm',             [201254]),            # Type 1 diabetes mellitus
+    ('fh',               [314522]),            # Familial hypercholesterolaemia
+    ('pad',              [321052]),            # Peripheral vascular disease / PAD
+
+    # High Risk
+    ('metabolic_syndrome', [4028741]),         # Metabolic syndrome
+    ('osa',              [4173505]),           # Obstructive sleep apnea
+    ('heart_failure',    [316139]),            # Heart failure
+    ('afib',             [313217]),            # Atrial fibrillation
+
+    # Inflammatory / Autoimmune
+    ('ra',               [80809]),             # Rheumatoid arthritis
+    ('sle',              [201606]),            # Systemic lupus erythematosus (TBV)
+    ('psoriasis',        [140168]),            # Psoriasis
+    ('crohns',           [4052776]),           # Crohn's disease (TBV)
+    ('ulc_colitis',      [4059478]),           # Ulcerative colitis (TBV)
+    ('hiv',              [439727]),            # HIV
+
+    # Endocrine / Hormonal
+    ('hypothyroidism',   [140673]),            # Hypothyroidism
+    ('hyperthyroidism',  [4058243]),           # Hyperthyroidism (TBV)
+    ('pcos',             [4070454]),           # Polycystic ovary syndrome (TBV)
+    ('cushings',         [197961]),            # Cushing's syndrome (TBV)
+    ('acromegaly',       [4023722]),           # Acromegaly (TBV)
+
+    # Pregnancy-related (coded 0 for males)
+    ('preeclampsia',     [4060985, 4024244]),  # Pre-eclampsia + eclampsia (TBV)
+    ('gest_dm',          [4024659]),           # Gestational diabetes (TBV)
+    ('preterm',          [4163838]),           # Preterm delivery (TBV)
+    ('preg_loss',        [4067106]),           # Spontaneous abortion / pregnancy loss (TBV)
+]
+
+# Cardiotoxic chemotherapy — queried from drug_exposure (no condition code)
+# Anthracyclines + trastuzumab; concept_ancestor captures all formulations
+CHEMO_FLAGS = [
+    ('cardiotoxic_chemo', [1350066,  # doxorubicin
+                           1396797,  # epirubicin
+                           1313411,  # daunorubicin
+                           1336941,  # idarubicin
+                           1336825]),# trastuzumab
+]
+
+# IBD composite (Crohn's OR UC) — derived after COND_FLAGS built
+IBD_COLS = ['crohns', 'ulc_colitis']
+
 # Binary columns — written as int in final CSV
 BINARY_COLS = [
     'mace3_event', 'has_mi', 'has_stroke', 'has_cvd_death', 'has_any_death',
     'htn', 't2dm', 'obesity_dx', 'cad_prev', 'ckd', 'current_smoker',
+    # medications
     'statin', 'ace_inhibitor', 'arb', 'beta_blocker', 'ccb', 'diuretic',
     'aspirin', 'p2y12', 'oral_anticoag', 'metformin', 'any_antihtn',
+    # additional comorbidities
+    't1dm', 'fh', 'pad',
+    'metabolic_syndrome', 'osa', 'heart_failure', 'afib',
+    'ra', 'sle', 'psoriasis', 'crohns', 'ulc_colitis', 'ibd', 'hiv',
+    'hypothyroidism', 'hyperthyroidism', 'pcos', 'cushings', 'acromegaly',
+    'cardiotoxic_chemo',
+    'preeclampsia', 'gest_dm', 'preterm', 'preg_loss',
 ]
 
 
@@ -240,6 +300,53 @@ for col, concept_ids in MED_FLAGS:
 master['any_antihtn'] = master[ANY_ANTIHTN_COLS].max(axis=1).astype(int)
 n = master['any_antihtn'].sum()
 print(f"  {'any_antihtn':<16} {n:>10,}  {100*n/len(master):>5.1f}%  (ACE|ARB|BB|CCB|diuretic)")
+
+
+# ── STEP 6b: Additional comorbidities ────────────────────────────────────────
+sep("STEP 6b: Additional comorbidities (conditions + cardiotoxic chemo)")
+print(f"\n  {'Flag':<22} {'N persons':>10}  {'%':>6}")
+print(f"  {'─'*45}")
+
+for col, concept_ids in COND_FLAGS:
+    ids_str = ', '.join(str(i) for i in concept_ids)
+    q_cond = f"""
+    SELECT DISTINCT CAST(co.person_id AS STRING) AS person_id
+    FROM `{CDR}.condition_occurrence` co
+    JOIN `{CDR}.concept_ancestor` ca
+        ON co.condition_concept_id = ca.descendant_concept_id
+    WHERE ca.ancestor_concept_id IN ({ids_str})
+      AND co.condition_start_date < '{LANDMARK}'
+    """
+    cond_df = client.query(q_cond).to_dataframe()
+    cond_df['person_id'] = cond_df['person_id'].astype(str)
+    exposed = set(cond_df['person_id']) & set(cohort_ids)
+    master[col] = master['person_id'].isin(exposed).astype(int)
+    n = master[col].sum()
+    print(f"  {col:<22} {n:>10,}  {100*n/len(master):>5.1f}%")
+    del cond_df; gc.collect()
+
+for col, concept_ids in CHEMO_FLAGS:
+    ids_str = ', '.join(str(i) for i in concept_ids)
+    q_chemo = f"""
+    SELECT DISTINCT CAST(de.person_id AS STRING) AS person_id
+    FROM `{CDR}.drug_exposure` de
+    JOIN `{CDR}.concept_ancestor` ca
+        ON de.drug_concept_id = ca.descendant_concept_id
+    WHERE ca.ancestor_concept_id IN ({ids_str})
+      AND de.drug_exposure_start_date < '{LANDMARK}'
+    """
+    chemo_df = client.query(q_chemo).to_dataframe()
+    chemo_df['person_id'] = chemo_df['person_id'].astype(str)
+    exposed = set(chemo_df['person_id']) & set(cohort_ids)
+    master[col] = master['person_id'].isin(exposed).astype(int)
+    n = master[col].sum()
+    print(f"  {col:<22} {n:>10,}  {100*n/len(master):>5.1f}%  [drug_exposure]")
+    del chemo_df; gc.collect()
+
+# IBD composite
+master['ibd'] = master[IBD_COLS].max(axis=1).astype(int)
+n = master['ibd'].sum()
+print(f"  {'ibd':<22} {n:>10,}  {100*n/len(master):>5.1f}%  (Crohn's | UC)")
 
 
 # ── STEP 7: Smoking fix ───────────────────────────────────────────────────────

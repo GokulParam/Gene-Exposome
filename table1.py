@@ -32,7 +32,21 @@ CORE = [
     'age_at_landmark', 'sex_at_birth', 'race', 'ethnicity',
     'bmi', 'sbp', 'dbp', 'chol_total', 'ldl', 'hdl',
     'hba1c', 'glucose', 'creatinine',
+    # existing comorbidities
     'htn', 't2dm', 'obesity_dx', 'cad_prev', 'ckd',
+    # new comorbidities — very high risk
+    't1dm', 'fh', 'pad',
+    # new comorbidities — high risk
+    'metabolic_syndrome', 'osa', 'heart_failure', 'afib',
+    # inflammatory / autoimmune
+    'ra', 'sle', 'psoriasis', 'crohns', 'ulc_colitis', 'ibd', 'hiv',
+    # endocrine
+    'hypothyroidism', 'hyperthyroidism', 'pcos', 'cushings', 'acromegaly',
+    # cancer treatment
+    'cardiotoxic_chemo',
+    # pregnancy-related
+    'preeclampsia', 'gest_dm', 'preterm', 'preg_loss',
+    # medications
     'statin', 'ace_inhibitor', 'arb', 'beta_blocker', 'ccb', 'diuretic',
     'any_antihtn', 'aspirin', 'p2y12', 'oral_anticoag', 'metformin',
     'current_smoker',
@@ -135,15 +149,70 @@ for col, label in [
     num_row(label, col)
 
 print(f"\n\nCOMORBIDITIES (prevalent before 2018-01-01)\n{S}")
+print(f"  ── Very High Risk ──")
 for col, label in [
     ('htn',        'Hypertension'),
-    ('t2dm',       'Type 2 diabetes'),
+    ('t2dm',       'Type 2 diabetes mellitus'),
+    ('t1dm',       'Type 1 diabetes mellitus'),
     ('obesity_dx', 'Obesity (coded)'),
-    ('cad_prev',   'Prior CAD'),
+    ('cad_prev',   'Prior CAD (MI / stroke / PCI / CABG)'),
+    ('pad',        'Peripheral artery disease'),
     ('ckd',        'Chronic kidney disease'),
+    ('fh',         'Familial hypercholesterolaemia'),
 ]:
     if col in master.columns:
-        print(f"  {label:<42} {pct(col)}")
+        print(f"  {label:<48} {pct(col)}")
+
+print(f"\n  ── High Risk ──")
+for col, label in [
+    ('metabolic_syndrome', 'Metabolic syndrome'),
+    ('osa',               'Obstructive sleep apnea'),
+    ('heart_failure',     'Heart failure'),
+    ('afib',              'Atrial fibrillation'),
+]:
+    if col in master.columns:
+        print(f"  {label:<48} {pct(col)}")
+
+print(f"\n  ── Inflammatory / Autoimmune ──")
+for col, label in [
+    ('ra',          'Rheumatoid arthritis'),
+    ('sle',         'Systemic lupus erythematosus'),
+    ('psoriasis',   'Psoriasis'),
+    ('ibd',         'Inflammatory bowel disease (composite)'),
+    ('crohns',      "  Crohn's disease"),
+    ('ulc_colitis', '  Ulcerative colitis'),
+    ('hiv',         'HIV'),
+]:
+    if col in master.columns:
+        print(f"  {label:<48} {pct(col)}")
+
+print(f"\n  ── Endocrine / Hormonal ──")
+for col, label in [
+    ('hypothyroidism',  'Hypothyroidism'),
+    ('hyperthyroidism', 'Hyperthyroidism'),
+    ('pcos',            'Polycystic ovary syndrome'),
+    ('cushings',        "Cushing's syndrome"),
+    ('acromegaly',      'Acromegaly'),
+]:
+    if col in master.columns:
+        print(f"  {label:<48} {pct(col)}")
+
+print(f"\n  ── Cancer Treatment ──")
+for col, label in [
+    ('cardiotoxic_chemo', 'Cardiotoxic chemotherapy (anthracyclines / trastuzumab)'),
+]:
+    if col in master.columns:
+        print(f"  {label:<48} {pct(col)}")
+
+print(f"\n  ── Pregnancy-Related ──")
+for col, label in [
+    ('preeclampsia', 'Pre-eclampsia or eclampsia'),
+    ('gest_dm',      'Gestational diabetes'),
+    ('preterm',      'Preterm delivery'),
+    ('preg_loss',    'Pregnancy loss / miscarriage'),
+]:
+    if col in master.columns:
+        print(f"  {label:<48} {pct(col)}")
 
 print(f"\n\nMEDICATIONS (any use before 2018-01-01)\n{S}")
 print(f"  {'Lipid-lowering'}")
