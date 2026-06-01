@@ -15,7 +15,8 @@ WORKSPACE = '/home/dataproc/workspaces/geneexposome'
 def nrows(path):
     if not os.path.exists(path):
         return None
-    return len(pd.read_csv(path, usecols=['person_id']))
+    with open(path) as f:
+        return sum(1 for _ in f) - 1  # subtract header row
 
 n_full      = nrows(f'{WORKSPACE}/cohort_skeleton_full.csv')
 n_incident  = nrows(f'{WORKSPACE}/cohort_skeleton_incident.csv')
@@ -65,21 +66,25 @@ print(SEP2)
 print("  COHORT EXCLUSION FLOW")
 print(SEP2)
 if n_full is not None:
-    print(f"  All of Us participants with CAD PRS          {n_full:>7,}")
-if n_full and n_incident:
-    lost_prev = n_full - n_incident
-    print(f"  − Prevalent MACE before 2018-01-01           {lost_prev:>7,}  (excluded: MACE before landmark)")
+    print(f"  All of Us participants with CAD PRS            {n_full:>7,}")
+    if n_incident is not None:
+        lost_prev = n_full - n_incident
+        print(f"  − Prevalent MACE before 2018-01-01             {lost_prev:>7,}  (landmark exclusion)")
+    print(f"  − Age < 18 at landmark date (2018-01-01)         included above")
+else:
+    print(f"  (cohort_skeleton_full.csv not found — counts unavailable)")
 if n_incident is not None:
-    print(f"  = Incident cohort (landmark 2018-01-01)      {n_incident:>7,}")
-if n_incident and n_covariates and n_covariates != n_incident:
-    lost_cov = n_incident - n_covariates
-    print(f"  − Other exclusions (age <18 etc.)            {lost_cov:>7,}")
+    print(f"  = Incident cohort ≥18 at landmark               {n_incident:>7,}")
+else:
+    print(f"  (cohort_skeleton_incident.csv not found)")
+if n_covariates is not None and n_incident is not None and n_covariates != n_incident:
+    print(f"  − Additional exclusions during covariate step    {n_incident - n_covariates:>7,}")
 if n_covariates is not None:
-    print(f"  = After covariate extraction                 {n_covariates:>7,}")
-if n_covariates:
     lost_geo = n_covariates - N
-    print(f"  − Alaska / Hawaii / territories / invalid    {lost_geo:>7,}  (no exposome coverage)")
-print(f"  = FINAL ANALYSIS COHORT                      {N:>7,}")
+    print(f"  − Alaska / Hawaii / territories / invalid zip3   {lost_geo:>7,}  (no exposome data)")
+else:
+    lost_geo = '?'
+print(f"  = FINAL ANALYSIS COHORT                          {N:>7,}")
 print(SEP2)
 print()
 
