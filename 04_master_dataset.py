@@ -115,63 +115,48 @@ print("\n" + "=" * 60)
 print("STEP 3: Get zip3 from CDR")
 print("=" * 60)
 
-person_ids_sql = ", ".join(f"'{p}'" for p in master['person_id'].tolist())
-
-# Try cb_search_person first (has zip3_as_string in most CDR versions)
+# Pull ALL zip3 rows without a WHERE IN clause (avoids 1MB query limit).
+# We filter to our cohort in pandas after the fetch.
 zip3_query_cb = f"""
 SELECT CAST(person_id AS STRING) AS person_id,
        zip3_as_string AS zip3
 FROM `{CDR}.cb_search_person`
-WHERE CAST(person_id AS STRING) IN ({person_ids_sql})
-  AND zip3_as_string IS NOT NULL
+WHERE zip3_as_string IS NOT NULL
 """
 
 zip3_query_ext = f"""
 SELECT CAST(pe.person_id AS STRING) AS person_id,
        SUBSTR(pe.value_as_string, 1, 3) AS zip3
 FROM `{CDR}.person_ext` pe
-WHERE CAST(pe.person_id AS STRING) IN ({person_ids_sql})
-  AND pe.src_id LIKE '%zip%'
+WHERE pe.src_id LIKE '%zip%'
   AND pe.value_as_string IS NOT NULL
+"""
+
+zip3_query_obs = f"""
+SELECT CAST(o.person_id AS STRING) AS person_id,
+       SUBSTR(o.value_as_string, 1, 3) AS zip3
+FROM `{CDR}.observation` o
+WHERE o.observation_concept_id = 1585250
+  AND o.value_as_string IS NOT NULL
 """
 
 zip3_df = None
 for label, q in [('cb_search_person', zip3_query_cb),
-                  ('person_ext',       zip3_query_ext)]:
+                  ('person_ext',       zip3_query_ext),
+                  ('observation',      zip3_query_obs)]:
     try:
         tmp = client.query(q).to_dataframe()
+        tmp['person_id'] = tmp['person_id'].astype(str)
+        # Filter to our cohort in pandas (no query size limit)
+        tmp = tmp[tmp['person_id'].isin(master['person_id'])].copy()
         if len(tmp) > 0:
-            print(f"  zip3 source: {label}  —  {len(tmp):,} rows, "
-                  f"{tmp['person_id'].nunique():,} unique persons")
             zip3_df = tmp[['person_id', 'zip3']].drop_duplicates('person_id')
-            zip3_df['person_id'] = zip3_df['person_id'].astype(str)
+            print(f"  zip3 source: {label}  —  {len(zip3_df):,} unique persons matched")
             break
         else:
-            print(f"  {label}: returned 0 rows — trying next source")
+            print(f"  {label}: 0 rows matched cohort — trying next source")
     except Exception as e:
         print(f"  {label}: query failed ({e}) — trying next source")
-
-if zip3_df is None:
-    print("  WARNING: zip3 not found in cb_search_person or person_ext.")
-    print("  Trying observation table (survey zip codes)...")
-    zip3_obs = f"""
-    SELECT CAST(o.person_id AS STRING) AS person_id,
-           SUBSTR(o.value_as_string, 1, 3) AS zip3
-    FROM `{CDR}.observation` o
-    WHERE o.observation_concept_id = 1585250   -- AoU zip code survey item
-      AND o.value_as_string IS NOT NULL
-      AND CAST(o.person_id AS STRING) IN ({person_ids_sql})
-    """
-    try:
-        tmp = client.query(zip3_obs).to_dataframe()
-        if len(tmp) > 0:
-            zip3_df = tmp[['person_id', 'zip3']].drop_duplicates('person_id')
-            zip3_df['person_id'] = zip3_df['person_id'].astype(str)
-            print(f"  observation table: {len(zip3_df):,} persons with zip3")
-        else:
-            print("  observation table also returned 0 rows. Exposome merge will be all-NaN.")
-    except Exception as e:
-        print(f"  observation table failed: {e}")
 
 if zip3_df is not None:
     master = master.merge(zip3_df, on='person_id', how='left')
@@ -315,11 +300,16 @@ def _block(label, cols):
           f"rows with ≥1 missing: {n_missing:,} ({100*n_missing/N:.1f}%)")
     for c in cols[:5]:
         s = master[c]
-        if s.dtype == bool or s.nunique() <= 2:
-            print(f"    {c:<35} mean={s.mean():.3f}")
+        if pd.api.types.is_numeric_dtype(s):
+            if s.nunique() <= 2:
+                print(f"    {c:<35} mean={s.mean():.3f}  miss={s.isna().mean():.1%}")
+            else:
+                print(f"    {c:<35} median={s.median():.2f}  "
+                      f"IQR=[{s.quantile(.25):.2f},{s.quantile(.75):.2f}]  "
+                      f"miss={s.isna().mean():.1%}")
         else:
-            print(f"    {c:<35} median={s.median():.2f}  "
-                  f"IQR=[{s.quantile(.25):.2f},{s.quantile(.75):.2f}]  "
+            top = s.value_counts().index[0] if s.notna().any() else 'N/A'
+            print(f"    {c:<35} top='{top}'  n_unique={s.nunique()}  "
                   f"miss={s.isna().mean():.1%}")
     if len(cols) > 5:
         print(f"    ... ({len(cols)-5} more not shown)")
