@@ -104,17 +104,43 @@ MED_FLAGS = [
                        1599538]),# dabigatran (best-available ID — verify)
     ('metformin',     [1503297]),
 
-    # ── Diabetes medications (beyond metformin) ──────────────────────────────
-    # Concept IDs pending concept_id_lookup.py — [0] = skipped at runtime
-    ('sglt2i',        [0]),   # empagliflozin, canagliflozin, dapagliflozin, ertugliflozin
-    ('glp1ra',        [0]),   # semaglutide, liraglutide, dulaglutide, exenatide, tirzepatide
-    ('dpp4i',         [0]),   # sitagliptin, saxagliptin, alogliptin, linagliptin
-    ('sulfonylurea',  [0]),   # glipizide, glyburide, glimepiride
-    ('tzd',           [0]),   # pioglitazone, rosiglitazone
-    ('insulin_any',   [0]),   # glargine, lispro, aspart, detemir, degludec, NPH, regular
+    # ── SGLT2 inhibitors ─────────────────────────────────────────────────────
+    ('sglt2i',        [45774751,  # empagliflozin
+                       43526465,  # canagliflozin
+                       44785829,  # dapagliflozin
+                       793293]),  # ertugliflozin
+
+    # ── GLP-1 receptor agonists ──────────────────────────────────────────────
+    ('glp1ra',        [793143,    # semaglutide
+                       40170911,  # liraglutide
+                       45774435,  # dulaglutide
+                       1583722,   # exenatide
+                       779705]),  # tirzepatide
+
+    # ── DPP4 inhibitors ──────────────────────────────────────────────────────
+    ('dpp4i',         [1580747,   # sitagliptin
+                       40166035,  # saxagliptin
+                       43013884,  # alogliptin
+                       40239216]),# linagliptin
+
+    # ── Sulfonylureas ────────────────────────────────────────────────────────
+    ('sulfonylurea',  [1560171,   # glipizide
+                       1559684,   # glyburide
+                       1597756]), # glimepiride
+
+    # ── Thiazolidinediones ───────────────────────────────────────────────────
+    ('tzd',           [1525215,   # pioglitazone
+                       1547504]), # rosiglitazone
+
+    # ── Insulin (major modern analogues; concept_ancestor captures formulations)
+    ('insulin_any',   [1502905,   # insulin glargine
+                       1550023,   # insulin lispro
+                       1567198,   # insulin aspart, human
+                       1516976,   # insulin detemir
+                       35602717]),# insulin degludec
 
     # ── ARNI ────────────────────────────────────────────────────────────────
-    ('arni',          [0]),   # sacubitril (valsartan already in arb flag)
+    ('arni',          [46275719]),# sacubitril (valsartan component already in arb flag)
 ]
 
 # Derived composite flags
