@@ -161,8 +161,11 @@ for col in prs_cols:
 # STEP 7 — Save compact CSV
 # ═════════════════════════════════════════════════════════════════════════════
 print("\nSTEP 7: Save master_dataset.csv")
+# Pre-round floats in numpy (fast vectorised) — avoids slow float_format in to_csv
+for c in master.select_dtypes(include=['float32', 'float64']).columns:
+    master[c] = master[c].astype('float32').round(5)
 out_path = f'{WORKSPACE}/master_dataset.csv'
-master.to_csv(out_path, index=False, float_format='%.6g')
+master.to_csv(out_path, index=False)
 size_mb = os.path.getsize(out_path) / 1e6
 print(f"  Saved: {out_path}  ({size_mb:.1f} MB)")
 del master; gc.collect()
