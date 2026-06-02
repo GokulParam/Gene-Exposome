@@ -344,6 +344,7 @@ FROM `{CDR}.drug_exposure` de
 JOIN `{CDR}.concept_ancestor` ca
     ON de.drug_concept_id = ca.descendant_concept_id
 WHERE ca.ancestor_concept_id IN ({', '.join(str(i) for i in all_drug_ids)})
+  AND de.drug_exposure_start_date < '{LANDMARK}'
 GROUP BY de.person_id
 """
 print("  Querying all medication flags in one pass...")

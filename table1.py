@@ -216,7 +216,7 @@ for col, label in [
     if col in master.columns:
         print(f"  {label:<48} {pct(col)}")
 
-print(f"\n\nMEDICATIONS (any use, any time)\n{S}")
+print(f"\n\nMEDICATIONS (any use before 2018-01-01)\n{S}")
 print(f"  {'Lipid-lowering'}")
 for col, label in [
     ('statin',  '  Statin (any)'),
