@@ -320,87 +320,101 @@ for fname, pfx in EXPOSOME_FILES.items():
 master = master.drop(columns=['_z3'], errors='ignore')
 
 
-# ── STEP 6: Medications (re-queried with correct concept IDs) ────────────────
-sep("STEP 6: Medication flags")
-print(f"\n  {'Flag':<16} {'N persons':>10}  {'%':>6}  Drugs included")
-print(f"  {'─'*65}")
+# ── STEP 6: Medications (single pivoted BQ query) ────────────────────────────
+sep("STEP 6: Medication flags (single pivoted BQ query)")
 
-cohort_ids = master['person_id'].tolist()
+# Merge CHEMO_FLAGS into drug query — both hit drug_exposure
+all_drug_flags = MED_FLAGS + [(col, ids) for col, ids in CHEMO_FLAGS]
 
-for col, concept_ids in MED_FLAGS:
+all_drug_ids = set()
+drug_cases = []
+for col, concept_ids in all_drug_flags:
     ids_str = ', '.join(str(i) for i in concept_ids)
-    q_med = f"""
-    SELECT DISTINCT CAST(de.person_id AS STRING) AS person_id
-    FROM `{CDR}.drug_exposure` de
-    JOIN `{CDR}.concept_ancestor` ca
-        ON de.drug_concept_id = ca.descendant_concept_id
-    WHERE ca.ancestor_concept_id IN ({ids_str})
-    """
-    med_df = client.query(q_med).to_dataframe()
-    med_df['person_id'] = med_df['person_id'].astype(str)
-    exposed = set(med_df['person_id']) & set(cohort_ids)
-    master[col] = master['person_id'].isin(exposed).astype(int)
+    drug_cases.append(
+        f"MAX(CASE WHEN ca.ancestor_concept_id IN ({ids_str}) THEN 1 ELSE 0 END) AS {col}"
+    )
+    all_drug_ids.update(concept_ids)
+
+q_meds = f"""
+SELECT
+    CAST(de.person_id AS STRING) AS person_id,
+    {chr(10) + '    ,'.join(drug_cases)}
+FROM `{CDR}.drug_exposure` de
+JOIN `{CDR}.concept_ancestor` ca
+    ON de.drug_concept_id = ca.descendant_concept_id
+WHERE ca.ancestor_concept_id IN ({', '.join(str(i) for i in all_drug_ids)})
+GROUP BY de.person_id
+"""
+print("  Querying all medication flags in one pass...")
+med_pivot = client.query(q_meds).to_dataframe()
+med_pivot['person_id'] = med_pivot['person_id'].astype(str)
+print(f"  CDR persons with any flag: {len(med_pivot):,}")
+
+master = master.merge(med_pivot, on='person_id', how='left')
+del med_pivot; gc.collect()
+
+print(f"\n  {'Flag':<22} {'N persons':>10}  {'%':>6}")
+print(f"  {'─'*42}")
+for col, _ in all_drug_flags:
+    master[col] = master[col].fillna(0).astype(int)
     n = master[col].sum()
-    print(f"  {col:<16} {n:>10,}  {100*n/len(master):>5.1f}%")
-    del med_df; gc.collect()
+    print(f"  {col:<22} {n:>10,}  {100*n/len(master):>5.1f}%")
 
 # Composite flags
 master['any_antihtn'] = master[ANY_ANTIHTN_COLS].max(axis=1).astype(int)
 n = master['any_antihtn'].sum()
-print(f"  {'any_antihtn':<16} {n:>10,}  {100*n/len(master):>5.1f}%  (ACE|ARB|BB|CCB|diuretic)")
+print(f"  {'any_antihtn':<22} {n:>10,}  {100*n/len(master):>5.1f}%  (ACE|ARB|BB|CCB|diuretic)")
 
 dm_cols_present = [c for c in ANY_DM_MED_COLS if c in master.columns]
 master['any_dm_med'] = master[dm_cols_present].max(axis=1).astype(int)
 n = master['any_dm_med'].sum()
-print(f"  {'any_dm_med':<16} {n:>10,}  {100*n/len(master):>5.1f}%  (metformin|SGLT2i|GLP1RA|DPP4i|SU|TZD|insulin)")
+print(f"  {'any_dm_med':<22} {n:>10,}  {100*n/len(master):>5.1f}%  (metformin|SGLT2i|GLP1RA|DPP4i|SU|TZD|insulin)")
 
 
-# ── STEP 6b: Additional comorbidities ────────────────────────────────────────
-sep("STEP 6b: Additional comorbidities (conditions + cardiotoxic chemo)")
-print(f"\n  {'Flag':<22} {'N persons':>10}  {'%':>6}")
-print(f"  {'─'*45}")
+# ── STEP 6b: Additional comorbidities (single pivoted BQ query) ───────────────
+sep("STEP 6b: Condition flags (single pivoted BQ query)")
 
+all_cond_ids = set()
+cond_cases = []
+pending_cols = []
 for col, concept_ids in COND_FLAGS:
     if concept_ids == [0]:
-        master[col] = 0  # pending concept ID — run concept_id_lookup.py
-        print(f"  {col:<22} {'PENDING':>10}  (concept ID not yet verified)")
+        pending_cols.append(col)
         continue
     ids_str = ', '.join(str(i) for i in concept_ids)
-    q_cond = f"""
-    SELECT DISTINCT CAST(co.person_id AS STRING) AS person_id
-    FROM `{CDR}.condition_occurrence` co
-    JOIN `{CDR}.concept_ancestor` ca
-        ON co.condition_concept_id = ca.descendant_concept_id
-    WHERE ca.ancestor_concept_id IN ({ids_str})
-    """
-    cond_df = client.query(q_cond).to_dataframe()
-    cond_df['person_id'] = cond_df['person_id'].astype(str)
-    exposed = set(cond_df['person_id']) & set(cohort_ids)
-    master[col] = master['person_id'].isin(exposed).astype(int)
-    n = master[col].sum()
-    print(f"  {col:<22} {n:>10,}  {100*n/len(master):>5.1f}%")
-    del cond_df; gc.collect()
+    cond_cases.append(
+        f"MAX(CASE WHEN ca.ancestor_concept_id IN ({ids_str}) THEN 1 ELSE 0 END) AS {col}"
+    )
+    all_cond_ids.update(concept_ids)
 
-for col, concept_ids in CHEMO_FLAGS:
+q_conds = f"""
+SELECT
+    CAST(co.person_id AS STRING) AS person_id,
+    {chr(10) + '    ,'.join(cond_cases)}
+FROM `{CDR}.condition_occurrence` co
+JOIN `{CDR}.concept_ancestor` ca
+    ON co.condition_concept_id = ca.descendant_concept_id
+WHERE ca.ancestor_concept_id IN ({', '.join(str(i) for i in all_cond_ids)})
+GROUP BY co.person_id
+"""
+print("  Querying all condition flags in one pass...")
+cond_pivot = client.query(q_conds).to_dataframe()
+cond_pivot['person_id'] = cond_pivot['person_id'].astype(str)
+print(f"  CDR persons with any flag: {len(cond_pivot):,}")
+
+master = master.merge(cond_pivot, on='person_id', how='left')
+del cond_pivot; gc.collect()
+
+print(f"\n  {'Flag':<22} {'N persons':>10}  {'%':>6}")
+print(f"  {'─'*42}")
+for col, concept_ids in COND_FLAGS:
     if concept_ids == [0]:
-        master[col] = 0  # pending concept ID — run concept_id_lookup.py
-        print(f"  {col:<22} {'PENDING':>10}  [drug_exposure — concept ID not yet verified]")
-        continue
-    ids_str = ', '.join(str(i) for i in concept_ids)
-    q_chemo = f"""
-    SELECT DISTINCT CAST(de.person_id AS STRING) AS person_id
-    FROM `{CDR}.drug_exposure` de
-    JOIN `{CDR}.concept_ancestor` ca
-        ON de.drug_concept_id = ca.descendant_concept_id
-    WHERE ca.ancestor_concept_id IN ({ids_str})
-    """
-    chemo_df = client.query(q_chemo).to_dataframe()
-    chemo_df['person_id'] = chemo_df['person_id'].astype(str)
-    exposed = set(chemo_df['person_id']) & set(cohort_ids)
-    master[col] = master['person_id'].isin(exposed).astype(int)
-    n = master[col].sum()
-    print(f"  {col:<22} {n:>10,}  {100*n/len(master):>5.1f}%  [drug_exposure]")
-    del chemo_df; gc.collect()
+        master[col] = 0
+        print(f"  {col:<22} {'PENDING':>10}  (concept ID not yet verified)")
+    else:
+        master[col] = master[col].fillna(0).astype(int)
+        n = master[col].sum()
+        print(f"  {col:<22} {n:>10,}  {100*n/len(master):>5.1f}%")
 
 # IBD composite
 master['ibd'] = master[IBD_COLS].max(axis=1).astype(int)
