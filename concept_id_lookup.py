@@ -22,20 +22,25 @@ SEP = '─' * 70
 # ══════════════════════════════════════════════════════════════════════════════
 
 MACE_CONCEPT_IDS = {
-    # MACE events
+    # ── MI ────────────────────────────────────────────────────────────────────
     'MI ancestor':                4329847,
-    'CVA (stroke, broad)':        443454,
-    'Ischaemic stroke':           375557,
-    'Haemorrhagic stroke':        432923,
-    # CVD death cause concepts
+    # ── Stroke (ancestors in stroke_query) ────────────────────────────────────
+    'Ischaemic stroke (broad)':   443454,
+    'Cerebral embolism':          375557,
+    'Subarachnoid haemorrhage':   432923,
+    'Intracerebral haemorrhage':  376713,   # ← ADD to CELL 2 stroke_query ancestors
+    # ── CVD death cause concepts (corrected list now in CELL 2) ───────────────
+    'MI (CVD death cause)':       4329847,
     'Cardiac arrest':             321042,
-    'Sudden cardiac death':       4059796,
-    'Heart failure':              316139,   # confirmed correct in earlier lookup
-    'Cardiogenic shock':          40479586,
-    'Other specified heart dis.': 4108812,
-    'Hypertensive heart disease': 312927,
-    'Ischaemic heart disease':    4108814,
-    'Cerebrovascular disease':    4185932,
+    'Heart failure':              316139,
+    'Ischaemic heart disease':    4185932,
+    'Hypertensive heart disease': 442604,
+    'Ventricular fibrillation':   437894,
+    'Cardiogenic shock':          198571,
+    'Cerebral infarction':        443454,
+    'Cerebral embolism (death)':  375557,
+    'SAH (death)':                432923,
+    'Cerebral haemorrhage':       376713,
 }
 
 print('=' * 70)
@@ -319,3 +324,88 @@ print('SECTION D COMPLETE')
 print('Use the correct concept IDs above to fix CELL 2 CVD death definition')
 print('PCOS: confirm concept_id 40443308 is correct before re-running build_master.py')
 print('PCSK9i: check Section C output for evolocumab/alirocumab concept IDs')
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SECTION E — Stroke ancestor verification + traumatic SAH exclusion lookup
+#
+# CELL 2 stroke_query currently uses ancestors: 443454, 375557, 432923
+# NEEDS:  376713 (intracerebral haemorrhage) added
+# NEEDS:  traumatic SAH concept ID for exclusion
+# ══════════════════════════════════════════════════════════════════════════════
+
+print(f'\n\n{"=" * 70}')
+print('SECTION E — Stroke ancestor concepts + traumatic SAH exclusion lookup')
+print('=' * 70)
+
+# 1. Verify all stroke ancestor concept IDs (including 376713 to add)
+STROKE_ANCESTORS = {
+    443454: 'Ischaemic stroke (broad CVA ancestor)',
+    375557: 'Cerebral embolism',
+    432923: 'Subarachnoid haemorrhage (non-traumatic)',
+    376713: 'Intracerebral haemorrhage ← ADD THIS to CELL 2 stroke_query',
+}
+q_stroke = f"""
+SELECT concept_id, concept_name, domain_id, standard_concept
+FROM `{CDR}.concept`
+WHERE concept_id IN ({','.join(str(i) for i in STROKE_ANCESTORS)})
+ORDER BY concept_id
+"""
+stroke_df = client.query(q_stroke).to_dataframe()
+id_to_name_s = dict(zip(stroke_df['concept_id'], stroke_df['concept_name']))
+print('\nStroke ancestor concepts:')
+for cid, label in STROKE_ANCESTORS.items():
+    actual = id_to_name_s.get(cid, '*** NOT FOUND ***')
+    status = '✓' if cid in id_to_name_s else '✗'
+    print(f"  {status}  {cid:>10,}  {label}")
+    print(f"           Actual CDR name: '{actual}'")
+
+# 2. Look up traumatic SAH by SNOMED code to get OMOP concept_id for exclusion
+print(f'\n{SEP}')
+print('Traumatic SAH lookup (SNOMED codes for exclusion):')
+TRAUMATIC_SAH_SNOMED = {
+    '271611007': 'Traumatic subarachnoid haemorrhage',
+    '242766000': 'Traumatic subarachnoid hemorrhage with loss of consciousness',
+}
+q_tsah = f"""
+SELECT concept_id, concept_name, concept_code AS snomed_code, domain_id, standard_concept
+FROM `{CDR}.concept`
+WHERE vocabulary_id = 'SNOMED'
+  AND concept_code IN ({','.join(f"'{c}'" for c in TRAUMATIC_SAH_SNOMED)})
+ORDER BY concept_code
+"""
+tsah_df = client.query(q_tsah).to_dataframe()
+if len(tsah_df):
+    print(tsah_df.to_string(index=False))
+    print(f'\n  → Use these concept_ids in concept_ancestor to exclude traumatic SAH')
+    print(f'    from the stroke query ancestor list (432923 = non-traumatic SAH)')
+else:
+    # Fallback: name search
+    print('  Not found by SNOMED code — trying name fallback:')
+    q_tsah_name = f"""
+    SELECT concept_id, concept_name, concept_code, vocabulary_id, domain_id, standard_concept
+    FROM `{CDR}.concept`
+    WHERE standard_concept = 'S' AND domain_id = 'Condition'
+      AND LOWER(concept_name) LIKE '%traumatic%subarachnoid%'
+    ORDER BY concept_name
+    LIMIT 10
+    """
+    print(client.query(q_tsah_name).to_dataframe().to_string(index=False))
+
+# 3. How many hemorrhagic strokes does 376713 add?
+print(f'\n{SEP}')
+print('Incident hemorrhagic strokes captured by 376713 (after landmark):')
+q_count = f"""
+SELECT COUNT(DISTINCT co.person_id) AS n_persons,
+       COUNT(*) AS n_events
+FROM `{CDR}.condition_occurrence` co
+JOIN `{CDR}.concept_ancestor` ca
+  ON ca.descendant_concept_id = co.condition_concept_id
+WHERE ca.ancestor_concept_id = 376713
+  AND co.condition_start_date > '2018-01-01'
+"""
+cnt = client.query(q_count).to_dataframe()
+print(cnt.to_string(index=False))
+print(f'\n{"=" * 70}')
+print('SECTION E COMPLETE')
+print('Copy the traumatic SAH concept_id(s) into CELL 2 stroke exclusion')
+print('Add 376713 to stroke_query ancestor IN clause')
