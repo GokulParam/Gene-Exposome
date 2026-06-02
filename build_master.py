@@ -210,7 +210,8 @@ IBD_COLS = ['crohns', 'ulc_colitis']
 # Binary columns — written as int in final CSV
 BINARY_COLS = [
     'mace3_event', 'has_mi', 'has_stroke', 'has_cvd_death', 'has_any_death',
-    'htn', 't2dm', 'obesity_dx', 'cad_prev', 'ckd', 'current_smoker',
+    'htn', 't2dm', 'obesity_dx', 'cad_prev', 'ckd',
+    # current_smoker intentionally excluded — NaN = no survey data (XGBoost handles natively)
     # medications
     'statin', 'pcsk9i', 'ace_inhibitor', 'arb', 'beta_blocker', 'ccb', 'diuretic',
     'aspirin', 'p2y12', 'oral_anticoag', 'arni',
@@ -445,12 +446,21 @@ print(smoke['answer'].value_counts().to_string())
 
 current_ids = set(smoke.loc[
     smoke['answer'].str.contains('every day|some day', case=False, na=False), 'person_id'])
-master['current_smoker'] = master['person_id'].isin(current_ids).astype(int)
-n_ans = master['person_id'].isin(smoke['person_id']).sum()
-n_cur = master['current_smoker'].sum()
-print(f"\n  Answered (in cohort): {n_ans:,} ({100*n_ans/len(master):.1f}%)")
-print(f"  Current smoker:       {n_cur:,} ({100*n_cur/len(master):.1f}%)")
-del smoke, current_ids; gc.collect()
+non_current_ids = set(smoke.loc[
+    ~smoke['answer'].str.contains('every day|some day', case=False, na=False), 'person_id'])
+
+# NaN = no survey data; 1 = current smoker; 0 = confirmed non/former smoker
+master['current_smoker'] = np.nan
+master.loc[master['person_id'].isin(current_ids),     'current_smoker'] = 1.0
+master.loc[master['person_id'].isin(non_current_ids), 'current_smoker'] = 0.0
+
+n_cur     = int(master['current_smoker'].eq(1).sum())
+n_non     = int(master['current_smoker'].eq(0).sum())
+n_missing = int(master['current_smoker'].isna().sum())
+print(f"\n  Current smoker:        {n_cur:>7,} ({100*n_cur/len(master):.1f}%)")
+print(f"  Non/former smoker:     {n_non:>7,} ({100*n_non/len(master):.1f}%)")
+print(f"  No survey data (NaN):  {n_missing:>7,} ({100*n_missing/len(master):.1f}%)")
+del smoke, current_ids, non_current_ids; gc.collect()
 
 
 # ── STEP 8: Rank-based inverse normal transform (RINT) for PRS ────────────────
