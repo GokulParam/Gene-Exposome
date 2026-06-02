@@ -395,6 +395,7 @@ FROM `{CDR}.condition_occurrence` co
 JOIN `{CDR}.concept_ancestor` ca
     ON co.condition_concept_id = ca.descendant_concept_id
 WHERE ca.ancestor_concept_id IN ({', '.join(str(i) for i in all_cond_ids)})
+  AND co.condition_start_date < '{LANDMARK}'
 GROUP BY co.person_id
 """
 print("  Querying all condition flags in one pass...")

@@ -150,7 +150,7 @@ for col, label in [
 ]:
     num_row(label, col)
 
-print(f"\n\nCOMORBIDITIES (ever recorded, any time)\n{S}")
+print(f"\n\nCOMORBIDITIES (coded before 2018-01-01)\n{S}")
 print(f"  ── Very High Risk ──")
 for col, label in [
     ('htn',        'Hypertension'),
