@@ -61,7 +61,8 @@ MED_FLAGS = [
                        1592085,  # lovastatin
                        1549686,  # fluvastatin
                        40165636]),# pitavastatin
-    ('pcsk9i',        [0]),       # evolocumab + alirocumab — verify IDs via concept_id_lookup.py Section C
+    ('pcsk9i',        [46287466,  # evolocumab  (RxNorm 1665684, CDR-verified)
+                       46275447]), # alirocumab  (RxNorm 1659152, CDR-verified)
     ('ace_inhibitor', [1308216,  # lisinopril
                        1334456,  # ramipril
                        1341927,  # enalapril

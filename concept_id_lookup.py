@@ -130,8 +130,8 @@ RXNORM_LOOKUP = {
     'sacubitril':     ('1657973', 'Sacubitril'),
 
     # ── PCSK9 inhibitors ────────────────────────────────────────────────────
-    'evolocumab':     ('1860484', 'Evolocumab'),
-    'alirocumab':     ('1860485', 'Alirocumab'),
+    'evolocumab':     ('1665684', 'Evolocumab'),   # RxNorm corrected from name fallback
+    'alirocumab':     ('1659152', 'Alirocumab'),   # RxNorm corrected from name fallback
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
