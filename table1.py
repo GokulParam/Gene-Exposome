@@ -266,10 +266,12 @@ for col, label in [
 
 print(f"\n\nSMOKING\n{S}")
 if 'current_smoker' in master.columns:
-    print(f"  Current smoker                             {pct('current_smoker')}")
-    n_no_data = N - master['person_id'].isin(
-        master.loc[master['current_smoker'].notna(), 'person_id']).sum()
-    print(f"  (note: {N - int(master['current_smoker'].sum()):,} coded 0 = non/former smoker or no survey data)")
+    n_current = int(master['current_smoker'].eq(1).sum())
+    n_non     = int(master['current_smoker'].eq(0).sum())
+    n_missing = int(master['current_smoker'].isna().sum())
+    print(f"  Current smoker                             {n_current:>7,}  ({100*n_current/N:5.1f}%)")
+    print(f"  Non/former smoker (confirmed)              {n_non:>7,}  ({100*n_non/N:5.1f}%)")
+    print(f"  No smoking survey data (missing)           {n_missing:>7,}  ({100*n_missing/N:5.1f}%)")
 
 print(f"\n\nPOLYGENIC RISK SCORES (z-scored)\n{S}")
 for col, label in [
