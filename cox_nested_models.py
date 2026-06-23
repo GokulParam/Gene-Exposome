@@ -290,6 +290,8 @@ def fit_cox(covariate_cols, src=None, label=""):
     sub  = sub[['time', 'event'] + cols].copy()
     n, k = len(sub), len(cols)
 
+    n_events = int(sub['event'].sum())   # capture before del
+
     cph = CoxPHFitter(penalizer=0.05)
     cph.fit(sub, duration_col='time', event_col='event', show_progress=False)
     del sub; gc.collect()
@@ -302,7 +304,7 @@ def fit_cox(covariate_cols, src=None, label=""):
     return {
         'label':  label,
         'n':      n,
-        'events': int(sub['event'].sum()),
+        'events': n_events,
         'k':      k,
         'logL':   logL,
         'aic':    -2 * logL + 2 * k,
