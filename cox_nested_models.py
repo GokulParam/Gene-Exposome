@@ -186,14 +186,27 @@ EVENTS = int(df['event'].sum())
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 7. Null model (Royston R² baseline)
+# 7. Null log-likelihood — analytical Breslow formula (no model fitting needed)
+#
+# lifelines normalises covariates by their std; a constant column (std=0) causes
+# NaN in the Newton-Raphson step → ConvergenceError.  Instead we compute logL₀
+# directly: for each event time t, the null partial log-likelihood contribution
+# is −log(risk_set_size(t)).  Uses Breslow tie-handling (same as lifelines default).
 # ══════════════════════════════════════════════════════════════════════════════
-print("\nFitting null model …")
-_nd = df[['time', 'event']].assign(_c=0.0)
-_null = CoxPHFitter()
-_null.fit(_nd, duration_col='time', event_col='event', formula='_c - 1', show_progress=False)
-logL_null = _null.log_likelihood_
-del _nd, _null; gc.collect()
+print("Computing null log-likelihood analytically …")
+
+def _null_logL(times, events):
+    """Partial log-likelihood of Cox null model (all betas = 0), Breslow ties."""
+    t = np.asarray(times,  dtype=np.float64)
+    e = np.asarray(events, dtype=bool)
+    t_sorted = np.sort(t)
+    event_times = t[e]
+    # Risk set at each event time = # participants with time >= that event time
+    risk = len(t) - np.searchsorted(t_sorted, event_times, side='left')
+    return float(-np.sum(np.log(np.clip(risk, 1, None))))
+
+logL_null = _null_logL(df['time'], df['event'])
+print(f"  logL_null = {logL_null:.2f}")
 
 def royston_r2(logL_model, n):
     return float(np.clip(1 - np.exp(-2 * (logL_model - logL_null) / n), 0, 1))
@@ -206,6 +219,9 @@ def fit_cox(covariate_cols, src=None, label=""):
     src   = src if src is not None else df
     cols  = list(dict.fromkeys(c for c in covariate_cols if c in src.columns))
     sub   = src[['time', 'event'] + cols].dropna().copy()
+    # Drop zero-variance columns — lifelines normalises by std; std=0 → NaN delta
+    cols  = [c for c in cols if sub[c].nunique() > 1]
+    sub   = sub[['time', 'event'] + cols]
     n, k  = len(sub), len(cols)
 
     cph = CoxPHFitter(penalizer=0.05)
