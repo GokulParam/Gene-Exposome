@@ -26,17 +26,19 @@ Everything we measured, except age/sex/ethnicity and the exposome.
 
 import os
 import gc
+import importlib
 import subprocess
-import warnings
 import sys
+import warnings
 
-# Install lifelines if not present (AoU Dataproc environment)
-try:
-    from lifelines import CoxPHFitter
-except ModuleNotFoundError:
-    print("Installing lifelines …")
-    subprocess.check_call([sys.executable, '-m', 'pip', 'install', 'lifelines', '-q'])
-    from lifelines import CoxPHFitter
+# ── Ensure lifelines is installed (AoU Dataproc does not ship it) ─────────────
+# Run unconditionally so a cached failed import doesn't block us.
+subprocess.run(
+    [sys.executable, '-m', 'pip', 'install', 'lifelines', '-q'],
+    check=True
+)
+importlib.invalidate_caches()
+from lifelines import CoxPHFitter  # noqa: E402
 
 import numpy as np
 import pandas as pd
