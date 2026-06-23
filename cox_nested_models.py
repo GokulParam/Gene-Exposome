@@ -5,260 +5,249 @@ Nested Cox Proportional Hazards models (M1–M7) quantifying the incremental
 contribution of genetic risk (CAD PRS), clinical variables, and the exposome
 (physical and social domains) to time-to-incident-MACE survival.
 
-Data source: master_dataset.csv (380,780 participants, N=282 cols)
-             cohort_skeleton_incident.csv (for per-person event dates)
+Data source: master_dataset.csv  (380,780 × 282)
+             cohort_skeleton_incident.csv  (event dates)
 
-Column names reflect the actual master_dataset schema built by build_master.py.
-
-Model sequence
-──────────────
-M1  age + sex + ethnicity dummies                      ← demographic baseline
-M2  M1 + CAD_PRS                                       ← adds genetic risk
-M3  M1 + ALL clinical variables                        ← adds full clinical picture
-M4  M1 + CAD_PRS + ALL clinical variables              ← primary reference model
-M5  M4 + physical exposome (gee_, noise_, smart_, toxins_, wildfire_)
-M6  M4 + social exposome  (social_)
-M7  M4 + physical + social exposome                    ← full model
-
-'ALL clinical variables' = labs + comorbidities + medications + smoking + other PRS.
-Everything we measured, except age/sex/ethnicity and the exposome.
+Memory strategy: load only needed columns from each file; downcast to float32/int8;
+delete intermediates aggressively; fit one model at a time.
 """
 
-import os
-import gc
-import importlib
-import subprocess
-import sys
-import warnings
-
-# ── Ensure lifelines is installed (AoU Dataproc does not ship it) ─────────────
-# Run unconditionally so a cached failed import doesn't block us.
-subprocess.run(
-    [sys.executable, '-m', 'pip', 'install', 'lifelines', '-q'],
-    check=True
-)
-importlib.invalidate_caches()
-from lifelines import CoxPHFitter  # noqa: E402
-
+import os, gc, importlib, subprocess, sys, warnings
 import numpy as np
 import pandas as pd
 from scipy import stats as scipy_stats
+
+# ── Install lifelines if absent (AoU Dataproc does not ship it) ───────────────
+subprocess.run([sys.executable, '-m', 'pip', 'install', 'lifelines', '-q'], check=True)
+importlib.invalidate_caches()
+from lifelines import CoxPHFitter  # noqa: E402
 
 warnings.filterwarnings('ignore')
 
 WORKSPACE    = '/home/dataproc/workspaces/geneexposome'
 LANDMARK     = pd.Timestamp('2018-01-01')
-ADMIN_CENSOR = pd.Timestamp('2024-09-30')   # CDR C2024Q3R9 cut-off
+ADMIN_CENSOR = pd.Timestamp('2024-09-30')
 OUT_DIR      = WORKSPACE
 
 
-# ── 1. Load master dataset ────────────────────────────────────────────────────
-print("Loading master_dataset.csv …")
-master = pd.read_csv(f'{WORKSPACE}/master_dataset.csv', dtype={'person_id': str})
-print(f"  Shape: {master.shape}")
+# ══════════════════════════════════════════════════════════════════════════════
+# 1. Column definitions — everything by name so we load only what we need
+# ══════════════════════════════════════════════════════════════════════════════
 
-# ── 2. Merge event dates from cohort skeleton ─────────────────────────────────
-# cohort_skeleton_incident.csv has mace3_date and death_date_any per person.
-# These were not included in master_dataset to keep file size manageable.
-print("Loading cohort_skeleton_incident.csv for event dates …")
-skel_cols = ['person_id', 'mace3_date', 'death_date_any']
-skel = pd.read_csv(
-    f'{WORKSPACE}/cohort_skeleton_incident.csv',
-    usecols=lambda c: c in skel_cols,
-    dtype={'person_id': str},
-    parse_dates=['mace3_date', 'death_date_any'],
-)
-master = master.merge(skel, on='person_id', how='left')
-del skel; gc.collect()
-
-# ── 3. Build time-to-event columns ───────────────────────────────────────────
-# event = incident 3-point MACE (already restricted to post-2018 in pipeline)
-# time  = days from landmark to first MACE, or to earliest of (death, admin censor)
-master['event'] = master['mace3_event'].astype(int)
-
-event_date   = pd.to_datetime(master['mace3_date'],     errors='coerce')
-death_date   = pd.to_datetime(master['death_date_any'], errors='coerce')
-censor_date  = ADMIN_CENSOR
-
-# Censoring date per person = min(death, admin censor)
-censor_per_person = death_date.clip(upper=censor_date).fillna(censor_date)
-
-# time = event date if event, else censor date
-time_date = np.where(master['event'] == 1, event_date, censor_per_person)
-master['time'] = (pd.to_datetime(time_date) - LANDMARK).dt.days.clip(lower=1)
-
-n_with_date = event_date.notna().sum()
-print(f"  Event dates available: {n_with_date:,} / {master['event'].sum():,} events")
-print(f"  Follow-up range: {master['time'].min():.0f}–{master['time'].max():.0f} days")
-
-# ── 4. Encode ethnicity as dummy variables (replaces PC1–PC10) ────────────────
-# Reference category = most common value (typically "Not Hispanic or Latino")
-eth_dummies = pd.get_dummies(master['ethnicity'], prefix='eth', drop_first=False)
-ref_cat = master['ethnicity'].value_counts().index[0]
-ref_col = 'eth_' + ref_cat
-eth_cols = [c for c in eth_dummies.columns if c != ref_col]
-eth_dummies = eth_dummies[eth_cols].astype(int)
-master = pd.concat([master, eth_dummies], axis=1)
-print(f"  Ethnicity dummies: {eth_cols}  (ref='{ref_cat}')")
-
-# ── 5. Sex encoding ───────────────────────────────────────────────────────────
-master['sex_male'] = (master['sex_at_birth']
-                      .str.lower()
-                      .map(lambda x: 1 if 'male' in str(x) and 'female' not in str(x) else 0))
-
-# ── 6. Define column groups ───────────────────────────────────────────────────
-
-# Demographic baseline (M1 covariates)
-DEMO_COLS = ['age_at_landmark', 'sex_male'] + eth_cols
-
-# Labs — continuous measurements taken before landmark
-LAB_COLS = [c for c in [
+LAB_COLS = [
     'bmi', 'sbp', 'dbp', 'chol_total', 'ldl', 'hdl', 'hba1c', 'glucose', 'creatinine',
-] if c in master.columns]
-
-# All pre-landmark comorbidity flags (binary 0/1)
-COMORBIDITY_COLS = [c for c in [
+]
+COMORBIDITY_COLS = [
     'htn', 't2dm', 't1dm', 'obesity_dx', 'cad_prev', 'ckd', 'fh', 'pad',
     'metabolic_syndrome', 'osa', 'heart_failure', 'afib',
     'ra', 'sle', 'psoriasis', 'ibd', 'crohns', 'ulc_colitis', 'hiv',
     'hypothyroidism', 'hyperthyroidism', 'pcos', 'cushings', 'acromegaly',
     'cardiotoxic_chemo',
     'preeclampsia', 'gest_dm', 'preterm', 'preg_loss',
-] if c in master.columns]
-
-# All pre-landmark medication flags (binary 0/1)
-# Include all individual drugs; also composite any_antihtn and any_dm_med
-# (penalizer handles overlap with component flags)
-MED_COLS = [c for c in [
+]
+MED_COLS = [
     'statin', 'pcsk9i',
     'ace_inhibitor', 'arb', 'beta_blocker', 'ccb', 'diuretic', 'any_antihtn',
     'aspirin', 'p2y12', 'oral_anticoag', 'arni',
     'metformin', 'sglt2i', 'glp1ra', 'dpp4i', 'sulfonylurea', 'tzd', 'insulin_any',
     'any_dm_med',
-] if c in master.columns]
+]
+OTHER_PRS_COLS = ['prs_ldlc', 'prs_obesity', 'prs_sbp', 'prs_t2d']
 
-# Smoking — 1/0/NaN; impute missing as 0.5 (uncertain) for Cox models
-# to avoid dropping ~30% of cohort with no survey data
-if 'current_smoker' in master.columns:
-    master['current_smoker_imp'] = master['current_smoker'].fillna(0.5)
+# Exposome domain prefixes
+PHYS_PREFIXES = ('gee_', 'noise_', 'smart_', 'toxins_', 'wildfire_')
+SOC_PREFIXES  = ('social_',)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 2. Peek at master columns to build exact usecols list before loading
+# ══════════════════════════════════════════════════════════════════════════════
+print("Reading master_dataset.csv column list …")
+all_cols = pd.read_csv(f'{WORKSPACE}/master_dataset.csv', nrows=0).columns.tolist()
+
+PHYS_COLS_ALL = [c for c in all_cols if c.startswith(PHYS_PREFIXES)]
+SOC_COLS_ALL  = [c for c in all_cols if c.startswith(SOC_PREFIXES)]
+
+# Core columns we always need
+CORE_LOAD = list(dict.fromkeys(
+    ['person_id', 'mace3_event', 'age_at_landmark', 'sex_at_birth', 'ethnicity',
+     'cad_prs', 'current_smoker', 'zip3']
+    + LAB_COLS + COMORBIDITY_COLS + MED_COLS + OTHER_PRS_COLS
+    + PHYS_COLS_ALL + SOC_COLS_ALL
+))
+use_cols = [c for c in CORE_LOAD if c in all_cols]
+print(f"  Loading {len(use_cols)} / {len(all_cols)} columns")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 3. Load — memory-efficient dtypes
+# ══════════════════════════════════════════════════════════════════════════════
+print("Loading master_dataset.csv …")
+dtype_overrides = {c: 'float32' for c in (LAB_COLS + OTHER_PRS_COLS +
+                                            PHYS_COLS_ALL + SOC_COLS_ALL)
+                   if c in all_cols}
+dtype_overrides.update({c: 'int8' for c in (COMORBIDITY_COLS + MED_COLS)
+                         if c in all_cols})
+dtype_overrides['person_id'] = str
+
+df = pd.read_csv(
+    f'{WORKSPACE}/master_dataset.csv',
+    usecols=use_cols,
+    dtype=dtype_overrides,
+)
+print(f"  Loaded: {df.shape}  RAM ≈ {df.memory_usage(deep=True).sum()/1e6:.0f} MB")
+gc.collect()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 4. Event dates from skeleton
+# ══════════════════════════════════════════════════════════════════════════════
+print("Merging event dates from cohort_skeleton_incident.csv …")
+skel = pd.read_csv(
+    f'{WORKSPACE}/cohort_skeleton_incident.csv',
+    usecols=['person_id', 'mace3_date', 'death_date_any'],
+    dtype={'person_id': str},
+    parse_dates=['mace3_date', 'death_date_any'],
+)
+df = df.merge(skel[['person_id', 'mace3_date', 'death_date_any']],
+              on='person_id', how='left')
+del skel; gc.collect()
+
+event_date  = pd.to_datetime(df['mace3_date'],     errors='coerce')
+death_date  = pd.to_datetime(df['death_date_any'], errors='coerce')
+censor_pp   = death_date.clip(upper=ADMIN_CENSOR).fillna(ADMIN_CENSOR)
+
+df['event'] = df['mace3_event'].astype('int8')
+df['time']  = np.where(
+    df['event'] == 1,
+    (event_date  - LANDMARK).dt.days,
+    (censor_pp   - LANDMARK).dt.days,
+).clip(1).astype('float32')
+
+df = df.drop(columns=['mace3_date', 'death_date_any', 'mace3_event'], errors='ignore')
+gc.collect()
+print(f"  Events: {df['event'].sum():,}  Follow-up: {df['time'].min():.0f}–{df['time'].max():.0f} d")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 5. Encode demographics
+# ══════════════════════════════════════════════════════════════════════════════
+
+# Sex → binary int8
+df['sex_male'] = df['sex_at_birth'].str.lower().map(
+    lambda x: 1 if 'male' in str(x) and 'female' not in str(x) else 0
+).astype('int8')
+df = df.drop(columns=['sex_at_birth'])
+
+# Ethnicity → dummies (drop most common category as reference)
+ref_cat  = df['ethnicity'].value_counts().index[0]
+eth_dum  = pd.get_dummies(df['ethnicity'], prefix='eth').astype('int8')
+eth_cols = [c for c in eth_dum.columns if c != f'eth_{ref_cat}']
+df = pd.concat([df.drop(columns=['ethnicity']), eth_dum[eth_cols]], axis=1)
+del eth_dum; gc.collect()
+print(f"  Ethnicity dummies: {eth_cols}  (ref='{ref_cat}')")
+
+# Smoking — impute NaN → 0.5 (uncertain; avoids dropping ~30% of cohort)
+if 'current_smoker' in df.columns:
+    df['current_smoker_imp'] = df['current_smoker'].fillna(0.5).astype('float32')
+    df = df.drop(columns=['current_smoker'])
     SMOKE_COL = ['current_smoker_imp']
 else:
     SMOKE_COL = []
 
-# Other PRS scores (non-CAD) — RINT-normalised
-OTHER_PRS_COLS = [c for c in ['prs_ldlc', 'prs_obesity', 'prs_sbp', 'prs_t2d']
-                  if c in master.columns]
-
-# Full clinical block = labs + comorbidities + medications + smoking + non-CAD PRS
-CLIN_COLS = LAB_COLS + COMORBIDITY_COLS + MED_COLS + SMOKE_COL + OTHER_PRS_COLS
-
-# Exposome domains — physical and social
-PHYS_PREFIXES = ('gee_', 'noise_', 'smart_', 'toxins_', 'wildfire_')
-SOC_PREFIXES  = ('social_',)
-PHYS_COLS = [c for c in master.columns if c.startswith(PHYS_PREFIXES)]
-SOC_COLS  = [c for c in master.columns if c.startswith(SOC_PREFIXES)]
-
-print(f"\nColumn counts:")
-print(f"  Demographic (M1): {len(DEMO_COLS)}  [age, sex, {len(eth_cols)} ethnicity dummies]")
-print(f"  Labs:             {len(LAB_COLS)}")
-print(f"  Comorbidities:    {len(COMORBIDITY_COLS)}")
-print(f"  Medications:      {len(MED_COLS)}")
-print(f"  Smoking:          {len(SMOKE_COL)}")
-print(f"  Other PRS:        {len(OTHER_PRS_COLS)}")
-print(f"  Total clinical:   {len(CLIN_COLS)}")
-print(f"  Physical exposome:{len(PHYS_COLS)}")
-print(f"  Social exposome:  {len(SOC_COLS)}")
+# CAD PRS quartile for stratified analysis
+df['prs_q'] = pd.qcut(df['cad_prs'], 4, labels=[1, 2, 3, 4]).astype(int)
 
 
-# ── 7. Build analysis dataframe ───────────────────────────────────────────────
-ALL_NEEDED = (['time', 'event'] + DEMO_COLS + ['cad_prs'] +
-              CLIN_COLS + PHYS_COLS + SOC_COLS)
-avail = [c for c in ALL_NEEDED if c in master.columns]
-df    = master[avail].copy()
-del master; gc.collect()
+# ══════════════════════════════════════════════════════════════════════════════
+# 6. Finalise column groups (intersect with what's actually in df)
+# ══════════════════════════════════════════════════════════════════════════════
+def present(lst):
+    return [c for c in lst if c in df.columns and df[c].nunique() > 1]
 
-# Drop rows missing time/event/age/sex/PRS (core non-negotiables)
-df = df.dropna(subset=['time', 'event', 'age_at_landmark', 'sex_male', 'cad_prs'])
-df['time']  = df['time'].clip(lower=1).astype(float)
-df['event'] = df['event'].astype(int)
+DEMO_COLS = present(['age_at_landmark', 'sex_male'] + eth_cols)
+CLIN_COLS = present(LAB_COLS + COMORBIDITY_COLS + MED_COLS + SMOKE_COL + OTHER_PRS_COLS)
+PHYS_COLS = present(PHYS_COLS_ALL)
+SOC_COLS  = present(SOC_COLS_ALL)
 
-# Refresh column lists against what's actually present and non-constant
-def usable_cols(cols):
-    return [c for c in cols if c in df.columns and df[c].nunique() > 1]
+print(f"\nCovariates — Demo:{len(DEMO_COLS)}  Clinical:{len(CLIN_COLS)}  "
+      f"Phys:{len(PHYS_COLS)}  Soc:{len(SOC_COLS)}")
 
-DEMO_COLS_ = usable_cols(DEMO_COLS)
-CLIN_COLS_ = usable_cols(CLIN_COLS)
-PHYS_COLS_ = usable_cols(PHYS_COLS)
-SOC_COLS_  = usable_cols(SOC_COLS)
+# Drop everything not needed for modelling to free RAM
+keep = list(dict.fromkeys(
+    ['time', 'event', 'prs_q'] + DEMO_COLS + ['cad_prs'] + CLIN_COLS + PHYS_COLS + SOC_COLS
+))
+df = df[[c for c in keep if c in df.columns]].copy()
+gc.collect()
+print(f"Working dataframe: {df.shape}  RAM ≈ {df.memory_usage(deep=True).sum()/1e6:.0f} MB")
 
 N      = len(df)
 EVENTS = int(df['event'].sum())
-print(f"\nAnalysis dataset: N={N:,}  Events={EVENTS:,}  ({100*EVENTS/N:.1f}%)")
-print(f"PRS quartile column: {'present' if 'prs_quartile' in df.columns else 'building now'}")
-
-# CAD PRS quartile (used for stratified analysis)
-if 'prs_quartile' not in df.columns:
-    df['prs_quartile'] = pd.qcut(df['cad_prs'], 4, labels=[1, 2, 3, 4]).astype(int)
 
 
-# ── 8. Null model log-likelihood (for Royston R²) ────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# 7. Null model (Royston R² baseline)
+# ══════════════════════════════════════════════════════════════════════════════
 print("\nFitting null model …")
-_null_df = df[['time', 'event']].copy()
-_null_df['_c'] = 0.0
-cph_null = CoxPHFitter()
-cph_null.fit(_null_df, duration_col='time', event_col='event',
-             formula='_c - 1', show_progress=False)
-logL_null = cph_null.log_likelihood_
+_nd = df[['time', 'event']].assign(_c=0.0)
+_null = CoxPHFitter()
+_null.fit(_nd, duration_col='time', event_col='event', formula='_c - 1', show_progress=False)
+logL_null = _null.log_likelihood_
+del _nd, _null; gc.collect()
 
 def royston_r2(logL_model, n):
-    lrt = 2 * (logL_model - logL_null)
-    return float(np.clip(1 - np.exp(-lrt / n), 0, 1))
+    return float(np.clip(1 - np.exp(-2 * (logL_model - logL_null) / n), 0, 1))
 
 
-# ── 9. Cox fitting helper ─────────────────────────────────────────────────────
-def fit_cox(covariate_cols, src_df=None, label=""):
-    src = src_df if src_df is not None else df
-    cols = list(dict.fromkeys(c for c in covariate_cols if c in src.columns))
-    sub  = src[['time', 'event'] + cols].dropna()
-    n, k = len(sub), len(cols)
+# ══════════════════════════════════════════════════════════════════════════════
+# 8. Cox fitting helper — fits on a sub-dataframe, deletes it after
+# ══════════════════════════════════════════════════════════════════════════════
+def fit_cox(covariate_cols, src=None, label=""):
+    src   = src if src is not None else df
+    cols  = list(dict.fromkeys(c for c in covariate_cols if c in src.columns))
+    sub   = src[['time', 'event'] + cols].dropna().copy()
+    n, k  = len(sub), len(cols)
 
-    cph = CoxPHFitter(penalizer=0.05)   # ridge: handles correlated exposome columns
+    cph = CoxPHFitter(penalizer=0.05)
     cph.fit(sub, duration_col='time', event_col='event', show_progress=False)
+    del sub; gc.collect()
 
     logL = cph.log_likelihood_
-    aic  = -2 * logL + 2 * k
-    bic  = -2 * logL + k * np.log(n)
     c    = cph.concordance_index_
-    try:
-        c_se = cph.concordance_index_se_
-    except AttributeError:
-        c_se = 0.005
-    c_lo = max(0.5, c - 1.96 * c_se)
-    c_hi = min(1.0, c + 1.96 * c_se)
-    r2   = royston_r2(logL, n)
+    try:    c_se = cph.concordance_index_se_
+    except: c_se = 0.005
 
-    return cph, {
-        'label': label, 'n': n, 'events': int(sub['event'].sum()),
-        'k': k, 'logL': logL, 'aic': aic, 'bic': bic,
-        'c': c, 'c_lo': c_lo, 'c_hi': c_hi, 'r2': r2,
+    return {
+        'label':  label,
+        'n':      n,
+        'events': EVENTS,
+        'k':      k,
+        'logL':   logL,
+        'aic':    -2 * logL + 2 * k,
+        'bic':    -2 * logL + k * np.log(n),
+        'c':      c,
+        'c_lo':   max(0.5, c - 1.96 * c_se),
+        'c_hi':   min(1.0, c + 1.96 * c_se),
+        'r2':     royston_r2(logL, n),
     }
 
 
-# ── 10. Fit M1–M7 ─────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# 9. Fit M1–M7
+# ══════════════════════════════════════════════════════════════════════════════
 MODELS = {
-    'M1': DEMO_COLS_,
-    'M2': DEMO_COLS_ + ['cad_prs'],
-    'M3': DEMO_COLS_ + CLIN_COLS_,
-    'M4': DEMO_COLS_ + ['cad_prs'] + CLIN_COLS_,
-    'M5': DEMO_COLS_ + ['cad_prs'] + CLIN_COLS_ + PHYS_COLS_,
-    'M6': DEMO_COLS_ + ['cad_prs'] + CLIN_COLS_ + SOC_COLS_,
-    'M7': DEMO_COLS_ + ['cad_prs'] + CLIN_COLS_ + PHYS_COLS_ + SOC_COLS_,
+    'M1': DEMO_COLS,
+    'M2': DEMO_COLS + ['cad_prs'],
+    'M3': DEMO_COLS + CLIN_COLS,
+    'M4': DEMO_COLS + ['cad_prs'] + CLIN_COLS,
+    'M5': DEMO_COLS + ['cad_prs'] + CLIN_COLS + PHYS_COLS,
+    'M6': DEMO_COLS + ['cad_prs'] + CLIN_COLS + SOC_COLS,
+    'M7': DEMO_COLS + ['cad_prs'] + CLIN_COLS + PHYS_COLS + SOC_COLS,
 }
-
 DESCRIPTIONS = {
-    'M1': 'Demographics only  (age, sex, ethnicity)',
+    'M1': 'Demographics  (age, sex, ethnicity)',
     'M2': 'M1 + CAD PRS',
-    'M3': 'M1 + All clinical  (labs, PMH, medications, smoking, non-CAD PRS)',
+    'M3': 'M1 + All clinical  (labs, PMH, meds, smoking, non-CAD PRS)',
     'M4': 'M1 + CAD PRS + All clinical  [primary baseline]',
     'M5': 'M4 + Physical exposome  (GEE, noise, SMART, toxins, wildfire)',
     'M6': 'M4 + Social exposome',
@@ -267,44 +256,48 @@ DESCRIPTIONS = {
 
 results = {}
 for name, cols in MODELS.items():
-    unique_cols = list(dict.fromkeys(cols))
-    print(f"Fitting {name} ({len(unique_cols)} covariates) …", end='  ', flush=True)
+    u = list(dict.fromkeys(cols))
+    print(f"Fitting {name} ({len(u)} covariates) … ", end='', flush=True)
     try:
-        cph, s = fit_cox(unique_cols, label=name)
-        results[name] = (cph, s)
+        s = fit_cox(u, label=name)
+        results[name] = s
         print(f"logL={s['logL']:.1f}  C={s['c']:.4f}  R²={s['r2']:.4f}")
     except Exception as e:
         print(f"FAILED: {e}")
         results[name] = None
+    gc.collect()
 
 
-# ── 11. TABLE 1 — Model fit statistics ───────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# 10. Table 1 — model fit
+# ══════════════════════════════════════════════════════════════════════════════
 rows1 = []
 for name in ['M1','M2','M3','M4','M5','M6','M7']:
-    if results[name] is None:
-        continue
-    s = results[name][1]
+    s = results.get(name)
+    if s is None: continue
     rows1.append({
-        'Model':        name,
-        'Description':  DESCRIPTIONS[name],
-        'N':            f"{s['n']:,}",
-        'Events':       f"{s['events']:,}",
-        'k':            s['k'],
-        'Log-L':        f"{s['logL']:.2f}",
-        'AIC':          f"{s['aic']:.1f}",
-        'BIC':          f"{s['bic']:.1f}",
-        'Royston R²':   f"{s['r2']:.4f}",
-        "Harrell's C":  f"{s['c']:.4f}",
-        '95% CI C':     f"[{s['c_lo']:.4f}, {s['c_hi']:.4f}]",
+        'Model':       name,
+        'Description': DESCRIPTIONS[name],
+        'N':           f"{s['n']:,}",
+        'Events':      f"{s['events']:,}",
+        'k':           s['k'],
+        'Log-L':       f"{s['logL']:.2f}",
+        'AIC':         f"{s['aic']:.1f}",
+        'BIC':         f"{s['bic']:.1f}",
+        'Royston R²':  f"{s['r2']:.4f}",
+        "Harrell C":   f"{s['c']:.4f}",
+        '95% CI':      f"[{s['c_lo']:.4f}, {s['c_hi']:.4f}]",
     })
 
 df_t1 = pd.DataFrame(rows1)
-sep = '=' * 105
-print(f"\n{sep}\nTABLE 1 — Model Fit Statistics\n{sep}")
+SEP = '=' * 110
+print(f"\n{SEP}\nTABLE 1 — Model Fit Statistics\n{SEP}")
 print(df_t1.to_string(index=False))
 
 
-# ── 12. TABLE 2 — Nested LRT comparisons ─────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# 11. Table 2 — nested LRT
+# ══════════════════════════════════════════════════════════════════════════════
 INTERP = {
     ('M2','M1'): 'Incremental value of CAD PRS over demographics',
     ('M3','M1'): 'Incremental value of all clinical variables over demographics',
@@ -318,82 +311,84 @@ INTERP = {
 }
 
 def lrt_row(full, null):
-    if results[full] is None or results[null] is None:
-        return None
-    sf, sn  = results[full][1], results[null][1]
-    d_logL  = sf['logL'] - sn['logL']
-    chi2    = 2 * d_logL
-    ddf     = sf['k'] - sn['k']
-    pval    = scipy_stats.chi2.sf(chi2, max(ddf, 1))
+    sf, sn = results.get(full), results.get(null)
+    if sf is None or sn is None: return None
+    d_logL = sf['logL'] - sn['logL']
+    chi2   = 2 * d_logL
+    ddf    = sf['k'] - sn['k']
+    pval   = scipy_stats.chi2.sf(chi2, max(ddf, 1))
     return {
-        'Comparison':      f"{full} vs {null}",
-        'ΔlogL':           f"{d_logL:.2f}",
-        'LRT χ²':          f"{chi2:.2f}",
-        'df':              ddf,
-        'p-value':         f"{pval:.2e}" if pval > 1e-300 else "< 1e-300",
-        'ΔR²':             f"{sf['r2'] - sn['r2']:.4f}",
-        'Interpretation':  INTERP.get((full, null), ''),
+        'Comparison':    f"{full} vs {null}",
+        'ΔlogL':         f"{d_logL:.2f}",
+        'LRT χ²':        f"{chi2:.2f}",
+        'df':            ddf,
+        'p-value':       f"{pval:.2e}" if pval > 1e-300 else "< 1e-300",
+        'ΔR²':           f"{sf['r2'] - sn['r2']:.4f}",
+        'Interpretation': INTERP.get((full, null), ''),
     }
 
-COMPARISONS = [
+rows2 = [r for pair in [
     ('M2','M1'), ('M3','M1'), ('M4','M3'), ('M4','M2'),
     ('M5','M4'), ('M6','M4'), ('M7','M4'), ('M7','M5'), ('M7','M6'),
-]
+] if (r := lrt_row(*pair)) is not None]
 
-rows2 = [r for pair in COMPARISONS if (r := lrt_row(*pair)) is not None]
 df_t2 = pd.DataFrame(rows2)
-print(f"\n{sep}\nTABLE 2 — Nested LRT Comparisons\n{sep}")
+print(f"\n{SEP}\nTABLE 2 — Nested LRT Comparisons\n{SEP}")
 print(df_t2.to_string(index=False))
 
 
-# ── 13. STRATIFIED ANALYSIS by CAD PRS quartile ───────────────────────────────
-print(f"\n{sep}\nSTRATIFIED ANALYSIS — M4 / M5 / M6 / M7 within CAD PRS quartiles\n{sep}")
+# ══════════════════════════════════════════════════════════════════════════════
+# 12. Stratified analysis by CAD PRS quartile
+# ══════════════════════════════════════════════════════════════════════════════
+print(f"\n{SEP}\nSTRATIFIED — exposome LRT within PRS quartiles\n{SEP}")
 
 strat_rows = []
 for q in [1, 2, 3, 4]:
-    mask = df['prs_quartile'] == q
-    dfq  = df[mask].copy()
+    dfq = df[df['prs_q'] == q]
     nq, eq = len(dfq), int(dfq['event'].sum())
     print(f"\n  Q{q}: N={nq:,}  Events={eq:,}")
 
     qres = {}
-    for mname, extra in [('M4', []), ('M5', PHYS_COLS_), ('M6', SOC_COLS_), ('M7', PHYS_COLS_ + SOC_COLS_)]:
-        cols = list(dict.fromkeys(DEMO_COLS_ + ['cad_prs'] + CLIN_COLS_ + extra))
+    for mname, extra in [('M4',[]), ('M5',PHYS_COLS), ('M6',SOC_COLS), ('M7',PHYS_COLS+SOC_COLS)]:
+        cols = list(dict.fromkeys(DEMO_COLS + ['cad_prs'] + CLIN_COLS + extra))
         try:
-            _, s = fit_cox(cols, src_df=dfq, label=f"{mname}_Q{q}")
+            s = fit_cox(cols, src=dfq, label=f"{mname}_Q{q}")
             qres[mname] = s
             print(f"    {mname}: C={s['c']:.4f}  R²={s['r2']:.4f}")
         except Exception as e:
             print(f"    {mname}: FAILED — {e}")
             qres[mname] = None
+        gc.collect()
 
     for full, null in [('M5','M4'), ('M6','M4'), ('M7','M4')]:
-        if qres.get(full) and qres.get(null):
-            sf, sn = qres[full], qres[null]
-            chi2 = 2 * (sf['logL'] - sn['logL'])
-            ddf  = sf['k'] - sn['k']
-            pval = scipy_stats.chi2.sf(chi2, max(ddf, 1))
-            strat_rows.append({
-                'Quartile':  f"Q{q}",
-                'N':         nq,
-                'Events':    eq,
-                'Comparison':f"{full} vs {null}",
-                'M4 C':      f"{qres['M4']['c']:.4f}" if qres['M4'] else 'N/A',
-                'Fuller C':  f"{sf['c']:.4f}",
-                'LRT χ²':    f"{chi2:.2f}",
-                'df':        ddf,
-                'p-value':   f"{pval:.2e}",
-                'ΔR²':       f"{sf['r2'] - sn['r2']:.4f}",
-            })
+        sf, sn = qres.get(full), qres.get(null)
+        if sf is None or sn is None: continue
+        chi2 = 2 * (sf['logL'] - sn['logL'])
+        ddf  = sf['k'] - sn['k']
+        pval = scipy_stats.chi2.sf(chi2, max(ddf, 1))
+        strat_rows.append({
+            'Quartile':   f"Q{q}",
+            'N':          nq,
+            'Events':     eq,
+            'Comparison': f"{full} vs {null}",
+            'M4 C':       f"{qres['M4']['c']:.4f}" if qres['M4'] else 'N/A',
+            'Fuller C':   f"{sf['c']:.4f}",
+            'LRT χ²':     f"{chi2:.2f}",
+            'df':         ddf,
+            'p-value':    f"{pval:.2e}",
+            'ΔR²':        f"{sf['r2'] - sn['r2']:.4f}",
+        })
 
 df_strat = pd.DataFrame(strat_rows)
-print(f"\n{sep}\nSTRATIFIED TABLE — exposome LRT within each PRS quartile\n{sep}")
+print(f"\n{SEP}\nSTRATIFIED TABLE\n{SEP}")
 print(df_strat.to_string(index=False))
 
 
-# ── 14. Save ──────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# 13. Save
+# ══════════════════════════════════════════════════════════════════════════════
 df_t1.to_csv(   f'{OUT_DIR}/cox_table1_model_fit.csv',       index=False)
 df_t2.to_csv(   f'{OUT_DIR}/cox_table2_lrt_comparisons.csv', index=False)
 df_strat.to_csv(f'{OUT_DIR}/cox_table3_prs_stratified.csv',  index=False)
-print(f"\nSaved tables to {OUT_DIR}/cox_table1/2/3_*.csv")
+print(f"\nSaved to {OUT_DIR}/cox_table[1-3]_*.csv")
 print("DONE")
