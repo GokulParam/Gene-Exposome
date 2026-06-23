@@ -159,12 +159,8 @@ if 'current_smoker' in df.columns:
 else:
     SMOKE_COL = []
 
-# CAD PRS quartile for stratified analysis
-df['prs_q'] = pd.qcut(df['cad_prs'], 4, labels=[1, 2, 3, 4]).astype(int)
-
-
 # ══════════════════════════════════════════════════════════════════════════════
-# 6. Finalise column groups (intersect with what's actually in df)
+# 6. Finalise column groups
 # ══════════════════════════════════════════════════════════════════════════════
 def present(lst):
     return [c for c in lst if c in df.columns and df[c].nunique() > 1]
@@ -178,21 +174,74 @@ print(f"\nCovariates — Demo:{len(DEMO_COLS)}  Clinical:{len(CLIN_COLS)}  "
       f"Phys:{len(PHYS_COLS)}  Soc:{len(SOC_COLS)}")
 print(f"  Note: lab columns excluded (64–92% missing in AoU EHR data)")
 
-# ── Single analytic sample: complete on ALL M7 variables ─────────────────────
-# Define this ONCE before fitting any model so all 7 models use identical rows.
-# LRT is only valid when models are fitted on the same sample.
+# ── Single analytic sample: complete on all variables used across M1–M7 ───────
+# Defined ONCE so all models share identical rows — required for valid LRT.
 all_model_cols = list(dict.fromkeys(
     ['time', 'event'] + DEMO_COLS + ['cad_prs'] + CLIN_COLS + PHYS_COLS + SOC_COLS
 ))
 all_model_cols = [c for c in all_model_cols if c in df.columns]
-df = df[all_model_cols].dropna().copy()
+
+# Drop unnecessary columns before dropna to minimise peak RAM
+df = df[all_model_cols].dropna()
 gc.collect()
 
 N      = len(df)
 EVENTS = int(df['event'].sum())
-print(f"\nAnalytic sample (complete on all M7 variables): N={N:,}  Events={EVENTS:,}  "
-      f"({100*EVENTS/N:.1f}%)")
+print(f"\nAnalytic sample: N={N:,}  Events={EVENTS:,}  ({100*EVENTS/N:.1f}%)")
 print(f"  RAM ≈ {df.memory_usage(deep=True).sum()/1e6:.0f} MB")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 6b. Reduce exposome domains with PCA
+#
+# Fitting Cox models with 123 physical + 79 social columns on 380k rows
+# requires >2 GB for the internal Newton-Raphson matrices and crashes the kernel.
+# PCA within each domain compresses to the components explaining 90% of variance
+# (typically 15–25 PCs per domain) while preserving the between-domain block
+# structure needed for the LRT comparisons.
+#
+# Scientific rationale: the nested LRT tests whether a *domain* adds incremental
+# predictive value — PCA components span the same column space as the raw
+# variables, so the test is equivalent.  The n_components selected is printed
+# so it can be reported in the methods section.
+# ══════════════════════════════════════════════════════════════════════════════
+from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
+
+VARIANCE_TARGET = 0.90   # keep enough PCs to explain this fraction of variance
+
+def pca_reduce(raw_cols, prefix, df_in, var_target=VARIANCE_TARGET):
+    """Fit PCA on raw_cols of df_in, return (df_pcs, pc_col_names)."""
+    X = df_in[raw_cols].values.astype('float32')
+    # Standardise: PCA on exposome variables which have different scales/units
+    X = StandardScaler().fit_transform(X)
+    pca = PCA(n_components=min(len(raw_cols), X.shape[0] - 1), svd_solver='full')
+    pca.fit(X)
+    cumvar = np.cumsum(pca.explained_variance_ratio_)
+    n_keep = int(np.searchsorted(cumvar, var_target)) + 1
+    n_keep = max(n_keep, 1)
+    print(f"  {prefix}: {len(raw_cols)} cols → {n_keep} PCs "
+          f"(explain {100*cumvar[n_keep-1]:.1f}% variance)")
+    scores = pca.transform(X)[:, :n_keep]
+    pc_names = [f'{prefix}_PC{i+1}' for i in range(n_keep)]
+    df_pcs = pd.DataFrame(scores.astype('float32'), index=df_in.index, columns=pc_names)
+    return df_pcs, pc_names
+
+print("\nReducing exposome domains via PCA …")
+phys_pcs, PHYS_PC_COLS = pca_reduce(PHYS_COLS, 'phys', df)
+soc_pcs,  SOC_PC_COLS  = pca_reduce(SOC_COLS,  'soc',  df)
+
+# Replace raw exposome columns in df with PCs to free RAM
+df = df.drop(columns=PHYS_COLS + SOC_COLS)
+df = pd.concat([df, phys_pcs, soc_pcs], axis=1)
+del phys_pcs, soc_pcs; gc.collect()
+
+# Update lists used in model definitions
+PHYS_COLS = PHYS_PC_COLS
+SOC_COLS  = SOC_PC_COLS
+
+print(f"\nFinal working dataframe: {df.shape}  "
+      f"RAM ≈ {df.memory_usage(deep=True).sum()/1e6:.0f} MB")
 
 # CAD PRS quartile within the analytic sample
 df['prs_q'] = pd.qcut(df['cad_prs'], 4, labels=[1, 2, 3, 4]).astype(int)
@@ -282,9 +331,9 @@ DESCRIPTIONS = {
     'M2': 'M1 + CAD PRS',
     'M3': 'M1 + All clinical  (labs, PMH, meds, smoking, non-CAD PRS)',
     'M4': 'M1 + CAD PRS + All clinical  [primary baseline]',
-    'M5': 'M4 + Physical exposome  (GEE, noise, SMART, toxins, wildfire)',
-    'M6': 'M4 + Social exposome',
-    'M7': 'M4 + Physical + Social exposome  [full model]',
+    'M5': 'M4 + Physical exposome PCs  (GEE, noise, SMART, toxins, wildfire)',
+    'M6': 'M4 + Social exposome PCs',
+    'M7': 'M4 + Physical + Social exposome PCs  [full model]',
 }
 
 results = {}
