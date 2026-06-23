@@ -34,9 +34,14 @@ OUT_DIR      = WORKSPACE
 # 1. Column definitions — everything by name so we load only what we need
 # ══════════════════════════════════════════════════════════════════════════════
 
-LAB_COLS = [
-    'bmi', 'sbp', 'dbp', 'chol_total', 'ldl', 'hdl', 'hba1c', 'glucose', 'creatinine',
-]
+# Lab columns are excluded from the clinical block.
+# Missingness audit (cox_missingness_check.py) found all 9 labs are 64–92% missing
+# in AoU — EHR measurements only recorded when a test was ordered.
+# Complete-case analysis on labs collapses the cohort from 380,780 → 9,451 (2.5%),
+# producing a highly selected, non-representative subset.  Imputation at >50%
+# missing is unreliable.  Labs are therefore omitted; the clinical block uses only
+# the binary flags (comorbidities, medications, other PRS) which are 0% missing.
+LAB_COLS = []   # excluded — see above
 COMORBIDITY_COLS = [
     'htn', 't2dm', 't1dm', 'obesity_dx', 'cad_prev', 'ckd', 'fh', 'pad',
     'metabolic_syndrome', 'osa', 'heart_failure', 'afib',
@@ -71,8 +76,8 @@ SOC_COLS_ALL  = [c for c in all_cols if c.startswith(SOC_PREFIXES)]
 # Core columns we always need
 CORE_LOAD = list(dict.fromkeys(
     ['person_id', 'mace3_event', 'age_at_landmark', 'sex_at_birth', 'ethnicity',
-     'cad_prs', 'current_smoker', 'zip3']
-    + LAB_COLS + COMORBIDITY_COLS + MED_COLS + OTHER_PRS_COLS
+     'cad_prs', 'current_smoker']
+    + COMORBIDITY_COLS + MED_COLS + OTHER_PRS_COLS
     + PHYS_COLS_ALL + SOC_COLS_ALL
 ))
 use_cols = [c for c in CORE_LOAD if c in all_cols]
@@ -83,8 +88,7 @@ print(f"  Loading {len(use_cols)} / {len(all_cols)} columns")
 # 3. Load — memory-efficient dtypes
 # ══════════════════════════════════════════════════════════════════════════════
 print("Loading master_dataset.csv …")
-dtype_overrides = {c: 'float32' for c in (LAB_COLS + OTHER_PRS_COLS +
-                                            PHYS_COLS_ALL + SOC_COLS_ALL)
+dtype_overrides = {c: 'float32' for c in (OTHER_PRS_COLS + PHYS_COLS_ALL + SOC_COLS_ALL)
                    if c in all_cols}
 dtype_overrides.update({c: 'int8' for c in (COMORBIDITY_COLS + MED_COLS)
                          if c in all_cols})
@@ -166,47 +170,59 @@ def present(lst):
     return [c for c in lst if c in df.columns and df[c].nunique() > 1]
 
 DEMO_COLS = present(['age_at_landmark', 'sex_male'] + eth_cols)
-CLIN_COLS = present(LAB_COLS + COMORBIDITY_COLS + MED_COLS + SMOKE_COL + OTHER_PRS_COLS)
+CLIN_COLS = present(COMORBIDITY_COLS + MED_COLS + SMOKE_COL + OTHER_PRS_COLS)
 PHYS_COLS = present(PHYS_COLS_ALL)
 SOC_COLS  = present(SOC_COLS_ALL)
 
 print(f"\nCovariates — Demo:{len(DEMO_COLS)}  Clinical:{len(CLIN_COLS)}  "
       f"Phys:{len(PHYS_COLS)}  Soc:{len(SOC_COLS)}")
+print(f"  Note: lab columns excluded (64–92% missing in AoU EHR data)")
 
-# Drop everything not needed for modelling to free RAM
-keep = list(dict.fromkeys(
-    ['time', 'event', 'prs_q'] + DEMO_COLS + ['cad_prs'] + CLIN_COLS + PHYS_COLS + SOC_COLS
+# ── Single analytic sample: complete on ALL M7 variables ─────────────────────
+# Define this ONCE before fitting any model so all 7 models use identical rows.
+# LRT is only valid when models are fitted on the same sample.
+all_model_cols = list(dict.fromkeys(
+    ['time', 'event'] + DEMO_COLS + ['cad_prs'] + CLIN_COLS + PHYS_COLS + SOC_COLS
 ))
-df = df[[c for c in keep if c in df.columns]].copy()
+all_model_cols = [c for c in all_model_cols if c in df.columns]
+df = df[all_model_cols].dropna().copy()
 gc.collect()
-print(f"Working dataframe: {df.shape}  RAM ≈ {df.memory_usage(deep=True).sum()/1e6:.0f} MB")
 
 N      = len(df)
 EVENTS = int(df['event'].sum())
+print(f"\nAnalytic sample (complete on all M7 variables): N={N:,}  Events={EVENTS:,}  "
+      f"({100*EVENTS/N:.1f}%)")
+print(f"  RAM ≈ {df.memory_usage(deep=True).sum()/1e6:.0f} MB")
+
+# CAD PRS quartile within the analytic sample
+df['prs_q'] = pd.qcut(df['cad_prs'], 4, labels=[1, 2, 3, 4]).astype(int)
+
+# Remove zero-variance cols that survived after dropna (e.g. rare pregnancy flags)
+DEMO_COLS = present(DEMO_COLS)
+CLIN_COLS = present(CLIN_COLS)
+PHYS_COLS = present(PHYS_COLS)
+SOC_COLS  = present(SOC_COLS)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 7. Null log-likelihood — analytical Breslow formula (no model fitting needed)
+# 7. Null log-likelihood — analytical Breslow formula
 #
-# lifelines normalises covariates by their std; a constant column (std=0) causes
-# NaN in the Newton-Raphson step → ConvergenceError.  Instead we compute logL₀
-# directly: for each event time t, the null partial log-likelihood contribution
-# is −log(risk_set_size(t)).  Uses Breslow tie-handling (same as lifelines default).
+# Computed on the SAME analytic sample used for all models.
+# For each event time t, contribution = −log(number still at risk at t).
+# Uses Breslow approximation for tied event times (matches lifelines default).
 # ══════════════════════════════════════════════════════════════════════════════
-print("Computing null log-likelihood analytically …")
+print("\nComputing null log-likelihood on analytic sample …")
 
 def _null_logL(times, events):
-    """Partial log-likelihood of Cox null model (all betas = 0), Breslow ties."""
     t = np.asarray(times,  dtype=np.float64)
     e = np.asarray(events, dtype=bool)
-    t_sorted = np.sort(t)
+    t_sorted    = np.sort(t)
     event_times = t[e]
-    # Risk set at each event time = # participants with time >= that event time
     risk = len(t) - np.searchsorted(t_sorted, event_times, side='left')
     return float(-np.sum(np.log(np.clip(risk, 1, None))))
 
 logL_null = _null_logL(df['time'], df['event'])
-print(f"  logL_null = {logL_null:.2f}")
+print(f"  logL_null = {logL_null:.2f}  (N={N:,}  Events={EVENTS:,})")
 
 def royston_r2(logL_model, n):
     return float(np.clip(1 - np.exp(-2 * (logL_model - logL_null) / n), 0, 1))
@@ -216,13 +232,14 @@ def royston_r2(logL_model, n):
 # 8. Cox fitting helper — fits on a sub-dataframe, deletes it after
 # ══════════════════════════════════════════════════════════════════════════════
 def fit_cox(covariate_cols, src=None, label=""):
-    src   = src if src is not None else df
-    cols  = list(dict.fromkeys(c for c in covariate_cols if c in src.columns))
-    sub   = src[['time', 'event'] + cols].dropna().copy()
-    # Drop zero-variance columns — lifelines normalises by std; std=0 → NaN delta
-    cols  = [c for c in cols if sub[c].nunique() > 1]
-    sub   = sub[['time', 'event'] + cols]
-    n, k  = len(sub), len(cols)
+    src  = src if src is not None else df
+    # Analytic sample is already complete; no dropna needed except for stratified slices
+    cols = list(dict.fromkeys(c for c in covariate_cols if c in src.columns))
+    sub  = src[['time', 'event'] + cols].dropna()   # dropna handles stratified subsets
+    # Drop zero-variance columns (can occur in PRS-quartile strata for rare flags)
+    cols = [c for c in cols if sub[c].nunique() > 1]
+    sub  = sub[['time', 'event'] + cols].copy()
+    n, k = len(sub), len(cols)
 
     cph = CoxPHFitter(penalizer=0.05)
     cph.fit(sub, duration_col='time', event_col='event', show_progress=False)
@@ -236,7 +253,7 @@ def fit_cox(covariate_cols, src=None, label=""):
     return {
         'label':  label,
         'n':      n,
-        'events': EVENTS,
+        'events': int(sub['event'].sum()),
         'k':      k,
         'logL':   logL,
         'aic':    -2 * logL + 2 * k,
