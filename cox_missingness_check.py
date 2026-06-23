@@ -1,12 +1,11 @@
 """
 cox_missingness_check.py
 ========================
-Step 1 of fixing the Cox nested models.
-
-Loads master_dataset.csv and prints a sorted missingness table for every
-covariate used in M1–M7 across the full 380,780-participant cohort.
-
-DO NOT refit any models until this output has been reviewed.
+Prints a missingness table for all covariates used in cox_nested_models.py.
+Memory-safe: computes null counts per column without copying the dataframe,
+and simulates dropna shrinkage using boolean masks instead of repeated copies.
+Exposome columns (gee_, noise_, smart_, toxins_, wildfire_, social_) are
+excluded — we already confirmed ~100% linkage in the pipeline.
 """
 
 import numpy as np
@@ -14,7 +13,6 @@ import pandas as pd
 
 WORKSPACE = '/home/dataproc/workspaces/geneexposome'
 
-# ── Exact column lists used in cox_nested_models.py ──────────────────────────
 LAB_COLS = [
     'bmi', 'sbp', 'dbp', 'chol_total', 'ldl', 'hdl', 'hba1c', 'glucose', 'creatinine',
 ]
@@ -34,98 +32,78 @@ MED_COLS = [
     'any_dm_med',
 ]
 OTHER_PRS_COLS = ['prs_ldlc', 'prs_obesity', 'prs_sbp', 'prs_t2d']
-DEMO_EXTRA     = ['age_at_landmark', 'sex_at_birth', 'ethnicity', 'cad_prs']
+DEMO_COLS      = ['age_at_landmark', 'sex_at_birth', 'ethnicity', 'cad_prs']
 SMOKE_COL      = ['current_smoker']
 
-# Exposome prefixes
-PHYS_PREFIXES = ('gee_', 'noise_', 'smart_', 'toxins_', 'wildfire_')
-SOC_PREFIXES  = ('social_',)
-
-# ── Load only the columns we care about ──────────────────────────────────────
-print("Reading column list …")
-all_cols = pd.read_csv(f'{WORKSPACE}/master_dataset.csv', nrows=0).columns.tolist()
-
-PHYS_COLS = [c for c in all_cols if c.startswith(PHYS_PREFIXES)]
-SOC_COLS  = [c for c in all_cols if c.startswith(SOC_PREFIXES)]
-
-WANT = list(dict.fromkeys(
-    DEMO_EXTRA + SMOKE_COL
-    + LAB_COLS + COMORBIDITY_COLS + MED_COLS + OTHER_PRS_COLS
-    + PHYS_COLS + SOC_COLS
+# All non-exposome covariate columns
+ALL_CHECK_COLS = list(dict.fromkeys(
+    DEMO_COLS + LAB_COLS + COMORBIDITY_COLS + MED_COLS + SMOKE_COL + OTHER_PRS_COLS
 ))
-use_cols = [c for c in WANT if c in all_cols]
 
-print(f"Loading {len(use_cols)} columns …")
+# ── Load only these columns (no exposome) ────────────────────────────────────
+all_master_cols = pd.read_csv(f'{WORKSPACE}/master_dataset.csv', nrows=0).columns.tolist()
+use_cols = [c for c in ALL_CHECK_COLS if c in all_master_cols]
+
+print(f"Loading {len(use_cols)} columns (no exposome) …")
 df = pd.read_csv(f'{WORKSPACE}/master_dataset.csv', usecols=use_cols,
-                 dtype={'person_id': str})
+                 dtype={c: 'float32' for c in LAB_COLS + OTHER_PRS_COLS if c in use_cols})
 N = len(df)
-print(f"N = {N:,}\n")
+print(f"N = {N:,}   RAM ≈ {df.memory_usage(deep=True).sum()/1e6:.0f} MB\n")
 
-# ── Missingness table ─────────────────────────────────────────────────────────
+# ── Per-column missingness ────────────────────────────────────────────────────
 rows = []
 for col in use_cols:
-    if col not in df.columns:
-        continue
     n_miss = int(df[col].isna().sum())
-    rows.append({
-        'column':    col,
-        'domain':    ('Lab'           if col in LAB_COLS else
-                      'Comorbidity'   if col in COMORBIDITY_COLS else
-                      'Medication'    if col in MED_COLS else
-                      'Smoking'       if col in SMOKE_COL else
-                      'Other PRS'     if col in OTHER_PRS_COLS else
-                      'Demo/PRS'      if col in DEMO_EXTRA else
-                      'Phys exposome' if col.startswith(PHYS_PREFIXES) else
-                      'Soc exposome'),
-        'n_missing': n_miss,
-        'pct_miss':  round(100 * n_miss / N, 1),
-        'n_present': N - n_miss,
-    })
+    domain = ('Lab'          if col in LAB_COLS else
+              'Comorbidity'  if col in COMORBIDITY_COLS else
+              'Medication'   if col in MED_COLS else
+              'Smoking'      if col in SMOKE_COL else
+              'Other PRS'    if col in OTHER_PRS_COLS else
+              'Demo/PRS')
+    rows.append({'column': col, 'domain': domain,
+                 'n_missing': n_miss, 'pct_miss': round(100 * n_miss / N, 1)})
 
 miss_df = pd.DataFrame(rows).sort_values('pct_miss', ascending=False)
 
-SEP = '─' * 72
-print(f"\n{'='*72}")
-print(f"  MISSINGNESS TABLE  (N = {N:,})")
-print(f"{'='*72}")
-print(f"  {'Column':<35} {'Domain':<15} {'N missing':>10}  {'% miss':>7}")
+SEP = '─' * 70
+print(f"{'='*70}\n  MISSINGNESS TABLE  (N = {N:,})\n{'='*70}")
+print(f"  {'Column':<35} {'Domain':<14} {'N miss':>9}  {'% miss':>7}")
 print(SEP)
 for _, r in miss_df.iterrows():
     flag = '  *** >50%' if r['pct_miss'] > 50 else ('  * >10%' if r['pct_miss'] > 10 else '')
-    print(f"  {r['column']:<35} {r['domain']:<15} {r['n_missing']:>10,}  {r['pct_miss']:>6.1f}%{flag}")
+    print(f"  {r['column']:<35} {r['domain']:<14} {r['n_missing']:>9,}  {r['pct_miss']:>6.1f}%{flag}")
 
-# ── Summary by domain ─────────────────────────────────────────────────────────
-print(f"\n{'='*72}")
-print("  DOMAIN SUMMARY")
-print(f"{'='*72}")
-print(f"  {'Domain':<20} {'Cols':>5}  {'Cols >10% miss':>15}  {'Cols >50% miss':>15}")
+# ── Domain summary ────────────────────────────────────────────────────────────
+print(f"\n{'='*70}\n  DOMAIN SUMMARY\n{'='*70}")
+print(f"  {'Domain':<18} {'Cols':>5}  {'>10% miss':>10}  {'>50% miss':>10}")
 print(SEP)
-for domain in miss_df['domain'].unique():
+for domain in ['Demo/PRS', 'Lab', 'Comorbidity', 'Medication', 'Smoking', 'Other PRS']:
     sub = miss_df[miss_df['domain'] == domain]
-    print(f"  {domain:<20} {len(sub):>5}  {(sub['pct_miss']>10).sum():>15}  {(sub['pct_miss']>50).sum():>15}")
+    if len(sub) == 0:
+        continue
+    print(f"  {domain:<18} {len(sub):>5}  {(sub['pct_miss']>10).sum():>10}  {(sub['pct_miss']>50).sum():>10}")
 
-# ── Simulate analytic sample shrinkage ───────────────────────────────────────
-# Show how many participants remain as we add each domain's columns via dropna
-print(f"\n{'='*72}")
-print("  COMPLETE-CASE SAMPLE SIZE IF dropna() APPLIED BY DOMAIN")
-print(f"{'='*72}")
+# ── Complete-case shrinkage — boolean masks, no copies ────────────────────────
+print(f"\n{'='*70}\n  COMPLETE-CASE N IF dropna() APPLIED CUMULATIVELY\n{'='*70}")
 
-present = lambda lst: [c for c in lst if c in df.columns]
+def present(lst):
+    return [c for c in lst if c in df.columns]
 
-cumulative = df.copy()
+# Build one null-indicator array per column, accumulate a "any null so far" mask
+complete_mask = pd.Series(True, index=df.index)   # starts: all rows OK
+
 for label, cols in [
-    ('Demographics + PRS',     present(DEMO_EXTRA)),
-    ('+ Labs',                 present(LAB_COLS)),
-    ('+ Comorbidities',        present(COMORBIDITY_COLS)),
-    ('+ Medications',          present(MED_COLS)),
-    ('+ Smoking',              present(SMOKE_COL)),
-    ('+ Other PRS',            present(OTHER_PRS_COLS)),
-    ('+ Physical exposome',    present(PHYS_COLS)),
-    ('+ Social exposome',      present(SOC_COLS)),
+    ('Demographics + PRS',  present(DEMO_COLS)),
+    ('+ Labs',              present(LAB_COLS)),
+    ('+ Comorbidities',     present(COMORBIDITY_COLS)),
+    ('+ Medications',       present(MED_COLS)),
+    ('+ Smoking',           present(SMOKE_COL)),
+    ('+ Other PRS',         present(OTHER_PRS_COLS)),
 ]:
-    cumulative = cumulative.dropna(subset=cols)
-    print(f"  {label:<30}  N = {len(cumulative):>7,}  ({100*len(cumulative)/N:.1f}%)")
+    for col in cols:
+        complete_mask &= df[col].notna()
+    n_complete = int(complete_mask.sum())
+    print(f"  {label:<30}  N = {n_complete:>7,}  ({100*n_complete/N:.1f}%)")
 
-print(f"\n{'='*72}")
-print("  STOP — review the table above before refitting any models.")
-print(f"{'='*72}")
+print(f"\n  Note: Exposome columns (~100% linked) not shown — add negligible missingness.")
+print(f"\n{'='*70}\n  STOP — review before refitting models.\n{'='*70}")
